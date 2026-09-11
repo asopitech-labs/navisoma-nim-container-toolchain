@@ -11,6 +11,8 @@ NAVISOMA uses Nim to **integrate** mature C/C++ and system infrastructure, not t
 
 This document defines dependency order and workstreams, not an MVP cut or a schedule.
 
+The concrete native implementation paths are defined in [`native-c-cpp-integration-plan.md`](native-c-cpp-integration-plan.md). Production implementation should follow that document rather than reopening library/protocol choices inside individual backend tasks.
+
 ## Workstream A — Native interoperability foundation
 
 Establish the project-wide rules for using C/C++ safely from Nim.
@@ -27,6 +29,15 @@ Required outcomes:
 - dynamic/static linking policy;
 - native dependency version/provenance manifest;
 - reproducible acquisition/build/cache strategy across Linux, WSL, macOS and Windows.
+
+Locked default directions are now:
+
+- keep the NAVISOMA core behind C-oriented ABI boundaries;
+- use direct C binding for WSLC;
+- use official protobuf C++ + gRPC C++ generated code behind project-owned `extern "C"` facades for containerd and BuildKit;
+- use NimYAML for YAML;
+- use existing C++ JSON Schema validation behind a small C facade;
+- do not implement protocol transports, CNI, OCI low-level runtimes or VM technology.
 
 This work is tracked primarily by Issues #2, #11 and #12.
 
@@ -82,8 +93,8 @@ Reuse:
 
 - containerd itself;
 - upstream protobuf service definitions;
-- mature protobuf/gRPC native runtimes;
-- generated clients;
+- official protobuf/gRPC C++ runtimes;
+- generated C++ message/stub code;
 - CNI/low-level runtime infrastructure reached through the container stack.
 
 Study:
@@ -93,6 +104,7 @@ Study:
 
 Own:
 
+- a narrow project-owned C ABI facade over the generated C++ client;
 - the smallest Nim facade required by NAVISOMA;
 - namespace/context propagation;
 - operation composition needed by execution actions;
@@ -105,15 +117,22 @@ Standalone repository is conditional.
 
 ## Workstream E — WSL Containers integration
 
-Reuse the WSL Container API through its native projection.
+Reuse the WSL Container API through its native C projection.
 
-Preferred order:
+Preferred path:
 
-1. direct C ABI;
-2. minimal C/C++ shim only where necessary.
+```text
+pinned Microsoft.WSL.Containers SDK
+  -> wslcsdk.h generated raw bindings
+  -> importc
+  -> safe Nim handles/lifecycle/error/capability facade
+```
+
+A C++/WinRT layer is not required for the initial backend.
 
 Own:
 
+- generated/raw binding maintenance;
 - safe Nim handle/lifetime wrappers;
 - errors;
 - capability normalization;
@@ -129,10 +148,11 @@ Reuse:
 
 - BuildKit solver;
 - LLB/protobuf definitions;
-- mature protobuf/gRPC runtimes and generated code.
+- official protobuf/gRPC C++ runtimes and generated code.
 
 Own:
 
+- a narrow C ABI client/event facade over generated BuildKit C++ stubs;
 - Compose `build:` to build-action lowering;
 - Build backend abstraction;
 - cache/result identity as exposed to NAVISOMA;
@@ -167,7 +187,7 @@ Reuse a mature VM layer such as Lima. NAVISOMA manages the lifecycle/integration
 
 ### Windows
 
-Use WSLC programmatic APIs.
+Use WSLC programmatic C APIs.
 
 Own the common backend selection and capability model, not duplicate platform infrastructure.
 
@@ -182,7 +202,7 @@ Required classes:
 - Compose differential tests;
 - real-world Compose corpus;
 - native ABI/ownership/error/lifecycle tests;
-- protobuf/gRPC interoperability against real endpoints;
+- generated protobuf/gRPC interoperability against real endpoints;
 - OCI conformance/interoperability;
 - containerd integration;
 - BuildKit integration;
@@ -236,7 +256,7 @@ Native interoperability policy (#2/#11/#12)
             |
             +------------------------------+
             |                              |
-Compose semantics (#1)              Backend investigations
+Compose semantics (#1)              Backend integrations
             |                       containerd (#4)
             |                       WSLC (#5)
             |                       BuildKit (#7)
@@ -253,7 +273,7 @@ Compose semantics (#1)              Backend investigations
                          repository extraction (#10)
 ```
 
-This does not require finishing every research item before coding elsewhere; it defines the architectural dependency direction and the decisions that must be settled before committing to new foundational implementations.
+The architecture/library choices for native foundations are already documented. The remaining pre-production work in #11 is bounded validation of those selected paths, not a fresh technology survey.
 
 ## Code ownership test
 
