@@ -86,6 +86,7 @@ The current research and architecture documents are maintained under [`docs/`](d
 
 - [`docs/project-vision.md`](docs/project-vision.md) — scope, motivation, goals, and non-goals.
 - [`docs/ecosystem-research.md`](docs/ecosystem-research.md) — findings on the current Nim ecosystem and the areas NAVISOMA should reuse, strengthen, or implement.
+- [`docs/reference-implementations.md`](docs/reference-implementations.md) — codebases to reuse or study, adoption boundaries, compatibility oracles, and source-code provenance policy.
 - [`docs/architecture.md`](docs/architecture.md) — proposed frontend, execution model, runtime/build boundaries, and platform architecture.
 - [`docs/repository-strategy.md`](docs/repository-strategy.md) — multi-repository namespace and component boundaries.
 
