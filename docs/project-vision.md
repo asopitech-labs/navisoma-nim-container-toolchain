@@ -2,116 +2,128 @@
 
 ## Purpose
 
-NAVISOMA explores and builds a cross-platform container toolchain in Nim while strengthening the reusable container and cloud-native infrastructure available to the Nim ecosystem.
+NAVISOMA builds a cross-platform container toolchain in Nim for Linux, WSL, macOS, and Windows with WSL Containers.
 
-The originating problem is straightforward: a Compose-defined application should be operable through the same user-facing model on Linux, WSL, macOS, and Windows with WSL Containers without requiring Docker to be the common runtime or architectural center.
+Nim is selected deliberately because it can sit directly on top of mature C and C++ infrastructure. NAVISOMA is therefore **not** a project to recreate the cloud-native ecosystem in Nim. It is a project to own the semantic and orchestration layers that are genuinely missing while reusing established native implementations for protocol, validation, runtime, networking, build, VM, and low-level container responsibilities.
 
-The broader opportunity is that implementing this well requires capabilities that are currently fragmented or missing in Nim: Compose semantics, OCI models and registry access, containerd integration, WSL Container API integration, and potentially stronger protobuf/gRPC and JSON Schema infrastructure. NAVISOMA treats those missing pieces as reusable ecosystem work rather than private implementation details.
+The central design question is not "how do we rewrite this in Nim?" but:
+
+> What is the smallest NAVISOMA-owned semantic layer that can compose mature native systems into one coherent cross-platform container workflow?
 
 ## Problem statement
 
-Existing cross-platform container workflows commonly converge on Docker-compatible APIs or a particular runtime implementation. That is useful for compatibility, but it couples the portable application model to a vendor/runtime architecture.
+A Compose-defined application should be operable through the same user-facing model on Linux, WSL, macOS, and Windows with WSL Containers without requiring Docker to be the architectural center.
 
-NAVISOMA instead separates four concerns:
+Existing components already solve much of the lower stack:
 
-1. **Portable specifications** — Compose, OCI, protobuf/gRPC and related standards.
-2. **Semantic application/execution model** — what must be built, created, connected, started, observed, stopped, or removed.
-3. **Runtime/build implementations** — containerd, WSL Containers, BuildKit and future implementations.
-4. **Platform provisioning** — native Linux, WSL, macOS Linux VM management, and Windows.
+- containerd provides container lifecycle/content/snapshot/task services;
+- BuildKit provides image-build solving and LLB;
+- WSL Containers provides a native Windows container API;
+- OCI specifications define portable image/runtime/distribution vocabulary;
+- CNI, runc/crun-class runtimes, Lima and similar projects already solve lower platform concerns;
+- protobuf, gRPC, HTTP/2, TLS, JSON and JSON Schema have mature native implementations.
 
-The user should not have to choose a different orchestration model because one host uses containerd and another uses WSL Containers.
+NAVISOMA should integrate those systems, not compete with them unnecessarily.
+
+## Architectural ownership
+
+NAVISOMA directly owns the layers where its product value exists:
+
+1. **Compose semantics** — interpolation, merge/include/extends behavior, normalization, consistency rules and canonical project representation where these are not delegated safely to generic libraries.
+2. **Canonical application model** — runtime-neutral representation of services, images/builds, networks, mounts, ports, resources, health/dependency conditions and desired state.
+3. **Execution graph and planner** — explicit actions, dependencies, scheduling, reconciliation, explainability and deterministic teardown.
+4. **Capability model** — representing real backend/platform differences without exposing different user workflows.
+5. **Backend lowering/facades** — thin translation from NAVISOMA semantics to containerd, BuildKit, WSLC and selected platform services.
+6. **Cross-platform CLI and lifecycle** — one operational model across supported hosts.
+
+NAVISOMA does **not** automatically own the protocol/runtime implementations beneath those boundaries.
+
+## Native reuse policy
+
+For an external capability, evaluate integration in this order:
+
+1. Stable C ABI via `importc`.
+2. Thin C/C++ shim that exposes a stable narrow ABI over an existing implementation.
+3. Narrow direct C++ integration via `importcpp`.
+4. Generated bindings/code using upstream schemas or IDLs.
+5. Existing maintained Nim library.
+6. New Nim implementation only when the previous options are demonstrably inadequate.
+
+This is a core architectural rule, not an optimization for later.
+
+Examples of components expected to be reused rather than recreated include generic protobuf/gRPC transports, HTTP/2/TLS, JSON Schema validation, CNI networking, low-level OCI runtimes, BuildKit solving, and macOS virtualization infrastructure.
 
 ## Goals
 
 ### Cross-platform operational consistency
 
-Provide a coherent CLI and application lifecycle across:
+Provide one coherent CLI and lifecycle model across Linux, WSL, macOS and Windows/WSLC. Platform implementation differences stay below the canonical model unless a capability is genuinely unavailable.
 
-- Linux
-- WSL
-- macOS, using a managed Linux VM where Linux containers require one
-- Windows using WSL Containers
+### Compose semantics as first-class product logic
 
-Platform implementation differences must remain below the common semantic interface unless a capability is genuinely unavailable.
-
-### Native Compose ecosystem for Nim
-
-Implement the Compose Specification as a reusable Nim library rather than embedding ad-hoc YAML handling in the final CLI. Compose processing includes substantially more than deserialization: interpolation, merge semantics, include/extends handling, defaults, path resolution, normalization, consistency validation, and canonical project modeling.
-
-### OCI as a first-class vocabulary
-
-Represent images, descriptors, manifests, indexes, digests, platforms, layouts, distribution operations, and related concepts using OCI terminology and specifications wherever practical. Docker-specific concepts should not leak into the core model when an OCI concept exists.
+Compose is more than YAML deserialization. NAVISOMA must understand specification-defined processing and must be testable against Compose reference behavior. Generic YAML/JSON Schema work should be delegated to existing libraries where practical; Compose-specific behavior remains owned.
 
 ### Explicit planning and execution
 
-Translate a canonical application model into an explicit execution graph. Operations may include:
+Translate canonical desired state into an execution graph containing operations such as image resolution/pull, build, network/volume creation, container creation/start, health waiting, exec, stop and removal.
 
-- resolve/pull image
-- build image
-- create network
-- create volume
-- create container
-- start container
-- await health/readiness condition
-- execute process
-- stop container
-- remove container/resource
-
-The graph is the basis for scheduling, parallelism, reconciliation, observability, dry-run/explain output, and deterministic teardown.
+The graph is the basis for scheduling, parallelism, reconciliation, observability, dry-run/explain output and deterministic teardown.
 
 ### Independent build and runtime layers
 
-Image construction and container execution are different responsibilities. BuildKit integration should not force a particular runtime, and a runtime's built-in build functionality should not define the architecture.
+BuildKit or another builder is selected independently of container execution. A runtime backend must not silently become the build architecture.
 
-### Strengthen Nim infrastructure through real workloads
+### OCI as vocabulary, not a rewrite mandate
 
-NAVISOMA should provide an end-to-end consumer for its lower-level libraries. A protocol implementation is not considered useful merely because a toy RPC succeeds; containerd and BuildKit provide realistic workloads for protobuf/gRPC. OCI registry operations provide realistic HTTP/content-addressing workloads. Compose provides a complex configuration-language workload for YAML, JSON Schema, interpolation, normalization, and semantic validation.
+Use OCI terminology and structures where they provide the portable concepts NAVISOMA needs. Do not infer that adopting OCI requires writing a complete language-native OCI ecosystem.
+
+### Thin, reusable integration surfaces
+
+Bindings/facades may become independent packages when they have clear reuse value. A repository is not created merely because an external system exists.
 
 ## Non-goals
 
-NAVISOMA is not defined as:
+NAVISOMA is not:
 
 - a Docker Desktop clone;
 - a Docker daemon reimplementation;
-- a wrapper that shells out to Docker on every platform;
-- a Compose-to-WSLC translator with Windows treated as a separate product;
-- an excuse to reimplement mature Nim libraries that already satisfy the required specification and maintenance criteria;
-- a single monolithic repository containing every reusable protocol and specification implementation.
+- a reimplementation of containerd, BuildKit, CNI, runc/crun or Lima;
+- a new gRPC/protobuf/HTTP2/TLS/JSON Schema ecosystem by default;
+- a Compose-to-WSLC translator with a separate Windows orchestration path;
+- a repository factory for `nvsm-*` packages;
+- a wrapper that shells out to Docker for every operation.
 
-Docker and Docker Compose remain important compatibility/reference implementations, but they are not the internal architecture.
+Shelling out to an existing CLI can be used as a bootstrap or fallback when justified, but stable programmatic native APIs are preferred for the product architecture.
 
-## Umbrella model
+## Repository model
 
-NAVISOMA is both the umbrella for the ecosystem effort and the name associated with the integrated container toolchain. Reusable libraries may live in separate repositories under the `nvsm-` namespace.
+The main repository is `navisoma-nim-container-toolchain`.
 
-The naming pattern is deliberately descriptive:
+The `nvsm-` namespace is reserved for independently useful code that NAVISOMA actually owns or maintains. Current repository classes are:
 
-```text
-nvsm-<upstream-or-specification>-nim
-```
+- **strong candidate:** Compose semantic implementation;
+- **strong/conditional binding candidate:** WSLC safe Nim client;
+- **conditional facade candidates:** containerd and BuildKit clients;
+- **conditional OCI packages:** only if substantial owned behavior remains after reuse;
+- **not default candidates:** gRPC, protobuf, JSON Schema, HTTP/2, TLS, YAML implementations.
 
-or, when the component is specifically a client/binding:
-
-```text
-nvsm-<upstream>-client-nim
-```
-
-This preserves recognizable upstream terminology while preventing the repositories from appearing to be official upstream implementations.
+Repository extraction follows demonstrated ownership and reuse value, not symmetry.
 
 ## Success criteria
 
 Success is not merely "a Compose file starts containers." Evidence should include:
 
-- specification/conformance coverage;
-- compatibility against relevant reference implementations;
+- Compose specification/reference compatibility;
 - deterministic canonical models;
 - correct dependency/lifecycle semantics;
 - capability-aware behavior across supported backends;
-- real containerd and WSL Container workloads;
-- reusable, independently documented Nim packages;
-- performance/resource measurements for parsing, planning and execution where they materially affect user experience;
-- explainable execution decisions rather than opaque orchestration.
+- real containerd, BuildKit and WSLC workloads;
+- proven C/C++ FFI ownership/error/threading correctness;
+- reproducible native dependency acquisition and linking;
+- performance/resource measurements where material;
+- explainable execution decisions;
+- minimal duplicated implementation relative to mature upstream systems.
 
 ## Research posture
 
-Implementation choices remain evidence-driven. Existing Nim projects are evaluated for specification coverage, API quality, maintenance, tests, portability and integration cost before a new library is created. NAVISOMA should fill ecosystem gaps, not manufacture duplicate packages for organizational symmetry.
+Before writing a subsystem, inspect its specification, mature production implementations, language bindings, C/C++ APIs, generated-code options, conformance tests, licenses and packaging model. New code must have a clear reason to exist beyond "there is no Nim package with this exact name."
