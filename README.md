@@ -112,6 +112,7 @@ Compatibility claims require specification/reference/differential tests and real
 - [`docs/ecosystem-research.md`](docs/ecosystem-research.md) — revised build-vs-reuse conclusions across the container ecosystem.
 - [`docs/reference-implementations.md`](docs/reference-implementations.md) — codebases to reuse/study, compatibility oracles, and provenance policy.
 - [`docs/native-library-reuse.md`](docs/native-library-reuse.md) — detailed C/C++ reuse research and FFI strategy.
+- [`docs/c-cpp-integration-assets.md`](docs/c-cpp-integration-assets.md) — concrete per-component use of WSLC SDK, gRPC/protobuf C++, containerd/BuildKit generated clients, JSON Schema C++, and platform-native assets.
 - [`docs/architecture.md`](docs/architecture.md) — semantic core, native integration boundaries, backends, and testing.
 - [`docs/repository-strategy.md`](docs/repository-strategy.md) — extraction criteria and reduced repository plan.
 
