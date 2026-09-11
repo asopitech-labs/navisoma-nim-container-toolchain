@@ -1,229 +1,180 @@
 # NAVISOMA Repository Strategy
 
-## Why multiple repositories
+## Principle
 
-NAVISOMA is intended to produce reusable Nim infrastructure, not a monolith whose useful libraries can only be consumed through the final container CLI.
+NAVISOMA does not create repositories to mirror every layer of the container ecosystem in Nim.
 
-Repository boundaries should follow independently useful specifications, protocols, and external APIs. They should not be created merely to make the project graph visually symmetrical.
+A repository is justified only when NAVISOMA owns or maintains an independently useful boundary. Thin internal glue should remain in the main repository unless it has clear external value.
 
-## Namespace
-
-Repositories developed as part of the NAVISOMA umbrella use the short prefix:
-
-```text
-nvsm-
-```
-
-The prefix solves two problems:
-
-1. Names such as `compose-nim` or `grpc-nim` can look like official language implementations maintained by the upstream project.
-2. NAVISOMA repositories remain searchable as one family without replacing recognizable upstream terminology with opaque component codenames.
-
-Example:
-
-```text
-nvsm-compose-nim
-```
-
-means the NAVISOMA project's Nim implementation of the Compose Specification.
+The `nvsm-` prefix remains reserved for NAVISOMA-maintained reusable packages so they are identifiable without appearing to be official upstream language implementations.
 
 ## Main repository
 
 ```text
-navisoma-nim-container-toolchain
+asopitech-labs/navisoma-nim-container-toolchain
 ```
 
 Responsibilities:
 
-- umbrella documentation and research
-- integrated CLI/toolchain
-- canonical application/execution model
-- planner/scheduler
-- backend abstraction
-- platform orchestration
-- integration and end-to-end conformance workloads
+- umbrella documentation/research;
+- CLI and user workflow;
+- canonical application model;
+- execution graph/planner/reconciliation;
+- capability model;
+- backend interfaces;
+- internal native shims/bindings that are not independently useful;
+- cross-platform provisioning integration;
+- end-to-end conformance/integration/performance tests.
 
-Reusable specification/protocol implementations should move to independent repositories once their boundaries are justified.
-
-## Candidate repositories
+## Strong repository candidates
 
 ### `nvsm-compose-nim`
 
-Purpose: native Compose Specification implementation for Nim.
+This is the clearest independent implementation boundary because Compose-specific semantics are product logic NAVISOMA must understand directly.
 
-Candidate responsibilities:
+Potential responsibilities:
 
-- Compose document loading
-- interpolation
-- merge semantics
-- include/extends
-- schema integration
-- defaults
-- normalization
-- path handling
-- consistency validation
-- canonical Compose project model
+- interpolation;
+- merge semantics;
+- include/extends processing;
+- defaults and normalization;
+- path handling;
+- consistency validation;
+- canonical Compose project model;
+- integration with existing YAML and JSON Schema engines;
+- reference/differential test corpus.
 
-Precedent: the Compose ecosystem's `compose-go` demonstrates the value of a reusable language-native Compose model independent of a single CLI.
-
-### `nvsm-oci-spec-nim`
-
-Purpose: language-native OCI specification models.
-
-Candidate responsibilities:
-
-- descriptors
-- digests
-- media types
-- manifests
-- image indexes
-- image configuration
-- platforms
-- image layouts
-- serialization/validation
-
-The `oci-spec-rs` project is a useful naming and architectural precedent for a language-native OCI specification package.
-
-### `nvsm-oci-client-nim`
-
-Purpose: OCI Distribution/registry client.
-
-Candidate responsibilities:
-
-- registry API discovery
-- authentication flows
-- manifests
-- blobs
-- uploads/downloads
-- tags
-- referrers
-- digest verification
-
-This remains separate from static OCI specification models because it introduces transport, authentication, streaming and retry concerns.
-
-### `nvsm-grpc-nim`
-
-Purpose: reusable gRPC implementation if a new repository is actually required.
-
-This repository must not be created until existing Nim projects such as Joubako and protobuf/serialization libraries have been evaluated. Upstream contribution is preferable when it can satisfy NAVISOMA's requirements.
-
-### `nvsm-containerd-client-nim`
-
-Purpose: native Nim client for containerd's public APIs.
-
-Candidate responsibilities:
-
-- generated/maintained API bindings
-- transport
-- namespaces
-- images/content
-- containers/tasks/processes
-- snapshots
-- leases/events
-- streaming helpers
-
-This is a containerd client, not a reimplementation of containerd.
-
-### `nvsm-buildkit-client-nim`
-
-Purpose: BuildKit/LLB client and supporting types.
-
-Candidate responsibilities:
-
-- BuildKit API bindings
-- LLB representation/tooling
-- solve/build operations
-- progress/events
-- import/export/cache interfaces required by NAVISOMA
-
-This is a build client, not a BuildKit solver reimplementation unless a future project explicitly chooses otherwise.
+Generic YAML or JSON Schema parsing is not part of this package unless evidence shows no usable external implementation.
 
 ### `nvsm-wslc-client-nim`
 
-Purpose: Nim bindings/client for the WSL Container API.
+A strong/conditional candidate because WSLC exposes a native API and a safe Nim binding may be independently useful.
 
-Candidate responsibilities:
+Potential responsibilities:
 
-- C ABI bindings where appropriate
-- safe Nim ownership/lifecycle wrappers
-- session/container/process operations
-- volume/network/port configuration
-- capability discovery/normalization
-- Windows-specific error translation
+- direct C ABI declarations or a minimal native shim;
+- ownership-safe Nim handles;
+- session/container/process operations;
+- volumes, networking and ports;
+- capability normalization;
+- error translation;
+- SDK/ABI version handling.
 
-This is the primary Windows execution integration for NAVISOMA.
+This package does not contain Compose orchestration.
 
-## Repositories that should not be assumed
+## Conditional repository candidates
 
-The umbrella must not automatically create:
+### `nvsm-containerd-client-nim`
+
+Create only if the containerd generated/native bridge plus ergonomic Nim facade has independent value beyond NAVISOMA.
+
+It should reuse upstream protobuf definitions, generated client code and mature protobuf/gRPC native runtimes rather than implement those protocols.
+
+### `nvsm-buildkit-client-nim`
+
+Create only if the BuildKit/LLB bridge/facade is independently reusable. BuildKit solving/caching/runtime logic remains upstream.
+
+### `nvsm-oci-spec-nim` / `nvsm-oci-client-nim`
+
+These are no longer assumed repositories. First determine whether NAVISOMA can use existing native/reference OCI implementations plus a smaller internal vocabulary/facade. Create standalone packages only if substantial reusable owned behavior remains.
+
+## Not default repositories
+
+The following are explicitly **not** planned merely because no perfect Nim package exists:
 
 ```text
-nvsm-yaml-nim
+nvsm-grpc-nim
 nvsm-protobuf-nim
-nvsm-http-nim
+nvsm-jsonschema-nim
+nvsm-http2-nim
+nvsm-tls-nim
+nvsm-yaml-nim
 ```
 
-Nim already has meaningful implementations in these areas. A new repository requires evidence that existing projects cannot meet the specification, maintenance, portability, or API requirements and cannot reasonably be improved upstream.
+Existing C/C++ or Nim implementations are the first choice. New implementations require a separate evidence-backed decision.
 
-The same rule applies to `nvsm-grpc-nim`.
+## Binding versus facade versus semantic implementation
 
-## Package naming
+Every package must declare which category it belongs to.
 
-GitHub repository names and Nimble package/module names do not have to be identical. The repository namespace communicates project provenance; imported module names should remain ergonomic and should avoid unnecessarily leaking umbrella branding into generic APIs.
+### Binding
 
-For example, a repository may be:
+Mechanical exposure of an upstream C/C++ ABI/API. Binding code should be thin and version-aware.
+
+### Shim
+
+Small native code used to convert a difficult C++ interface into a stable, narrow C-style boundary. A shim is not an excuse to duplicate upstream logic.
+
+### Client facade
+
+Ergonomic Nim API over generated/native client code. It may own lifecycle/error translation but not upstream protocol/runtime semantics.
+
+### Semantic implementation
+
+Logic whose behavior NAVISOMA must own and test against a specification/reference, such as Compose processing.
+
+Repository extraction is most justified for semantic implementations and externally useful client facades; least justified for trivial internal bindings.
+
+## Native dependencies
+
+Reusable packages may depend on native libraries. Each such repository must document:
+
+- upstream project and license;
+- supported upstream versions;
+- static/dynamic linking expectations;
+- package/distribution requirements;
+- ABI/API compatibility policy;
+- generated sources and regeneration instructions;
+- security/update policy.
+
+Do not hide a large vendored native stack behind a small Nimble package without making its provenance and build behavior explicit.
+
+## Dependency direction
 
 ```text
-nvsm-compose-nim
+existing native libraries
+ protobuf / gRPC / JSON Schema / TLS / platform APIs
+                 |
+       generated code / bindings / shims
+                 |
+ optional reusable facades
+ containerd / BuildKit / WSLC / OCI
+                 |
+        NAVISOMA-owned semantics
+ Compose -> canonical model -> execution graph
+                 |
+                 CLI
 ```
 
-while its public Nim module namespace can be designed around `compose` or another collision-safe package name according to Nimble availability and ecosystem conventions.
-
-Package names require a separate collision survey before publication.
-
-## Dependency policy
-
-Repositories should depend downward on specifications/protocols, never upward on the NAVISOMA product.
-
-Expected direction:
-
-```text
-compose library ---------------------+
-                                     |
-OCI spec -> OCI client --------------+
-                                     |
-protobuf/gRPC -> containerd client --+--> NAVISOMA
-             -> BuildKit client -----+
-                                     |
-WSLC client -------------------------+
-```
-
-This allows each package to be used by unrelated Nim applications.
+A lower-level package must not depend on the NAVISOMA CLI or planner.
 
 ## Creation criteria
 
-A candidate repository should be created when all of the following are true:
+A standalone repository is created only when:
 
-1. The responsibility has a coherent independent API.
-2. It has independent users beyond NAVISOMA or is a clean binding to an external specification/API.
-3. Existing Nim projects do not adequately cover the requirement, or the work has been intentionally split/upstreamed with maintainers.
-4. There is a conformance/interoperability test strategy.
-5. The repository name has been checked for collision with relevant upstream projects, GitHub repositories and Nimble packages.
+1. the responsibility has a coherent public API;
+2. code ownership is meaningful, not only a few internal FFI declarations;
+3. independent consumers are plausible or the binding is clearly valuable on its own;
+4. native/library provenance and packaging are understood;
+5. conformance/interoperability testing is defined;
+6. repository/Nimble naming collision is checked;
+7. maintaining a separate release/version lifecycle is justified.
+
+Otherwise keep the code in the main repository.
 
 ## Versioning
 
-Independent repositories should version according to their own compatibility surface and upstream specification/API evolution. NAVISOMA should not require all ecosystem repositories to share one synchronized version number.
+Each independent package versions its own public surface and tracks relevant upstream ABI/API compatibility separately. NAVISOMA does not synchronize all package versions.
 
-A breaking Compose API change should not force a WSLC binding major-version change, for example.
+Bindings/facades should explicitly publish the supported upstream version range.
 
-## Governance and provenance
+## Governance
 
-Each repository README should clearly state:
+Each extracted repository must state:
 
-- that it is developed under the NAVISOMA project;
-- whether it is an independent implementation or binding/client;
-- that it is not an official upstream project unless upstream ownership actually changes;
-- which upstream specification/API versions it targets;
-- current conformance/compatibility status.
-
-This is particularly important for names containing `compose`, `oci`, `grpc`, `containerd`, `buildkit`, or `wslc`.
+- that it is maintained under NAVISOMA;
+- whether it is a binding, shim, client facade or independent semantic implementation;
+- that it is unofficial unless upstream ownership says otherwise;
+- upstream versions/specifications targeted;
+- conformance/interoperability status;
+- native dependency and license provenance.
