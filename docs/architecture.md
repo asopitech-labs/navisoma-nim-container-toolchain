@@ -2,49 +2,40 @@
 
 ## Architectural thesis
 
-NAVISOMA should be designed as a specification-driven execution system rather than a Docker-compatible CLI wrapped around multiple foreign tools.
+NAVISOMA is a specification-driven execution system written in Nim. Nim is used as the orchestration and semantic integration language because it can directly consume mature C/C++ implementations.
 
-A useful compiler analogy is:
+The architecture is therefore split between **NAVISOMA-owned semantics** and **reused native infrastructure**.
 
 ```text
 Compose source
-    -> frontend processing
-    -> canonical application model
-    -> execution graph
-    -> runtime/build lowering
-    -> platform implementation
+    -> Compose semantic processing            [NAVISOMA-owned]
+    -> canonical application model            [NAVISOMA-owned]
+    -> execution graph / planner              [NAVISOMA-owned]
+    -> runtime/build lowering                 [NAVISOMA-owned]
+    -> thin Nim facade / C/C++ binding        [owned integration]
+    -> mature native implementation           [reused]
 ```
 
-This structure keeps Compose semantics, scheduling semantics, runtime semantics, and platform mechanics independently testable.
+The objective is to minimize duplicated protocol/runtime code while preserving a clean, runtime-neutral product model.
 
-## Layers
+## 1. Compose frontend
 
-### 1. Source and specification frontend
+Inputs may include Compose YAML, environment and `.env` data, included/extended documents, build contexts, and referenced images.
 
-Inputs may include:
-
-- Compose YAML files
-- environment variables and `.env` inputs
-- included/extended Compose documents
-- build contexts and build definitions
-- referenced OCI images/artifacts
-
-The Compose frontend is responsible for specification-defined processing, not container execution.
-
-Suggested processing model:
+Suggested processing stages:
 
 ```text
 Raw YAML
    |
-YAML AST/document
+YAML document                  <- existing YAML library
    |
-per-file interpolation
+Compose interpolation
    |
-merge/include/extends processing
+merge/include/extends
    |
-schema validation
+schema validation              <- existing JSON Schema implementation where suitable
    |
-defaults and normalization
+defaults / normalization
    |
 path resolution
    |
@@ -53,35 +44,29 @@ semantic consistency checks
 Canonical Compose Project
 ```
 
-Exact ordering must follow the Compose Specification/reference behavior and should be captured in tests rather than inferred from this diagram.
+Compose-specific ordering and semantics are NAVISOMA-owned and tested against the specification/reference behavior. Generic YAML and JSON Schema engines should be reused.
 
-### 2. Canonical application model
+## 2. Canonical application model
 
-The canonical model represents what the application declares without embedding containerd or WSLC handles/types.
+The model represents desired application state without leaking Docker, containerd, WSLC, gRPC, protobuf, BuildKit, or native-library types.
 
-Representative concepts include:
+Representative concepts:
 
-- project
-- service
-- image/build source
-- command/entrypoint
-- environment
-- mount
-- network attachment
-- published port
-- health check
-- dependency condition
-- resource request/limit
-- secret/config
-- volume/network declarations
+- project and service;
+- image/build source;
+- command/entrypoint/environment;
+- mount and volume;
+- network attachment and published port;
+- health/dependency condition;
+- resource request/limit;
+- secret/config;
+- platform/image identity.
 
-The model should be serializable to a stable diagnostic representation so different frontends/reference implementations can be compared in tests.
+It should support stable diagnostic serialization for differential tests and explain tooling.
 
-### 3. Execution graph
+## 3. Execution graph
 
-The planner lowers the application model into explicit actions and dependencies.
-
-Representative action kinds:
+The planner lowers desired application state into explicit actions, for example:
 
 ```text
 ResolveImage
@@ -99,156 +84,140 @@ RemoveVolume
 RemoveNetwork
 ```
 
-A Compose dependency such as a service waiting for another service to become healthy becomes graph dependencies rather than imperative special cases scattered through runtime code.
+The graph provides dependency scheduling, parallelism, deterministic teardown, dry-run/explain output, reconciliation, failure propagation and action-level metrics.
 
-The execution graph enables:
+## 4. Runtime-neutral semantics
 
-- parallel image pulls/builds where dependencies permit;
-- critical dependency visibility;
-- deterministic ordering;
-- dry-run and explain output;
-- selective reconciliation;
-- failure propagation policies;
-- deterministic teardown;
-- metrics at action boundaries.
+NAVISOMA defines a small semantic backend interface rather than mirroring any vendor API.
 
-### 4. Runtime-neutral container semantics
-
-NAVISOMA defines its own semantic interface. It must not simply mirror Docker Engine, containerd, or WSLC API shapes.
-
-Representative operations include:
+Representative operations:
 
 ```text
-Pull/resolve image
-Create container
-Start container
-Stop container
-Remove container
-Execute process
+Resolve/Pull image
+Create/Start/Stop/Remove container
+Exec process
 Inspect state
 Stream logs/I/O
-Create/remove volume
-Create/remove network
-Query runtime capabilities
+Create/Remove network
+Create/Remove volume
+Query capabilities
 ```
 
-The interface uses OCI concepts where suitable and exposes capability differences explicitly.
+Backend-native handles and protocol types terminate behind the facade.
 
-### 5. Runtime backends
+## 5. Native integration boundary
 
-#### containerd backend
+Every backend or generic facility is integrated through the smallest practical boundary.
 
-Target environments:
+Preferred order:
 
-- Linux
-- WSL
-- macOS Linux VM
+```text
+stable C ABI
+  -> thin C/C++ shim
+  -> narrow importcpp
+  -> generated code/bindings
+  -> existing Nim library
+  -> new Nim implementation only if required
+```
 
-The backend communicates with containerd through its protobuf/gRPC APIs. A native Nim client is preferred so the NAVISOMA process does not depend on a Go bridge or repeatedly shell out to nerdctl.
+The boundary must define:
 
-#### WSL Containers backend
+- ownership and lifetime;
+- error conversion;
+- callbacks and threading;
+- allocator boundaries;
+- async/completion behavior;
+- ABI/API version expectations;
+- static/dynamic linking policy;
+- packaging and redistribution requirements.
 
-Target environment:
+## 6. containerd backend
 
-- Windows with WSL Containers
+Targets Linux, WSL and the Linux VM used on macOS.
 
-The backend lowers the same runtime-neutral semantics into the WSL Container API. Native C ABI bindings are preferred where the supported API surface and stability are sufficient.
+containerd remains the runtime implementation. NAVISOMA should not recreate containerd services or a generic gRPC stack.
 
-WSLC is not a second product and does not receive a separate Compose implementation.
+Preferred architecture:
 
-### 6. Build backends
+```text
+Execution Graph
+   -> containerd facade in Nim
+   -> generated containerd protobuf/gRPC client code
+   -> official/mature protobuf + gRPC native runtime
+   -> containerd
+```
 
-Building is separate from running.
+nerdctl and the official containerd Go client are code/behavior references for service sequencing, namespace propagation, image/content/task lifecycle, leases, streaming and cleanup.
+
+## 7. WSL Containers backend
+
+Windows uses the same canonical/execution model and lowers it to the WSL Container API.
+
+Preferred architecture:
+
+```text
+Execution Graph
+   -> WSLC facade in Nim
+   -> direct C API binding where stable
+      or very thin C/C++ shim where required
+   -> WSL Container API
+```
+
+WSLC is a first-class backend, not a separate orchestration product.
+
+## 8. Build backend
+
+Image build and container execution are separate responsibilities.
 
 ```text
 Build action
-    |
-Build backend interface
-    |
-    +-- BuildKit / LLB
-    +-- future builders
+   -> Build facade
+   -> generated BuildKit/LLB protocol code
+   -> reused protobuf/gRPC native runtime
+   -> BuildKit solver
 ```
 
-This allows, for example, BuildKit to produce an OCI image that is subsequently consumed by either containerd or WSLC without coupling the execution backend to the builder.
+NAVISOMA owns Compose-to-build-action lowering and planner integration. BuildKit owns solving, caching and low-level execution.
 
-### 7. Platform provisioning
+## 9. OCI
 
-#### Linux
+OCI defines portable vocabulary for images, descriptors, manifests, indexes, digests, platforms and distribution behavior.
 
-Use native runtime services where available.
+NAVISOMA should expose only the OCI concepts required by its canonical model and backends. Existing OCI libraries/reference implementations should be reused or studied before introducing standalone Nim implementations.
 
-#### WSL
+## 10. Platform provisioning
 
-Use the Linux runtime path where appropriate.
+### Linux / WSL
 
-#### macOS
+Use existing runtime/network/storage components. Do not recreate CNI, runc/crun-class runtimes, namespaces/cgroups helpers or equivalent infrastructure.
 
-Ensure/manage a Linux VM, initially using an existing VM solution rather than building a hypervisor. Runtime communication should occur through the selected backend API once the VM is available.
+### macOS
 
-#### Windows
+Linux containers require a Linux VM. Reuse Lima or another mature VM layer for VM lifecycle, filesystem sharing and networking. NAVISOMA should integrate with the runtime inside the VM rather than implementing a hypervisor.
 
-Use the WSL Containers backend where supported.
+### Windows
 
-Provisioning and execution remain separate layers so VM lifecycle does not leak into Compose semantics.
+Use WSLC programmatic APIs where available.
 
-## Capability model
+Platform provisioning stays separate from Compose semantics.
 
-Different runtimes evolve at different speeds. NAVISOMA should represent support explicitly rather than pretending every backend has identical capabilities.
+## 11. Capability model
 
-Example capability categories:
+Capabilities are explicit and queryable. Categories include networking, storage, execution/TTY/I/O, resource controls, GPU, image operations and build support.
 
-```text
-Networking
-  - published TCP/UDP ports
-  - host/container networking modes
-  - aliases/DNS
+The planner should reject unsupported requirements before partial execution whenever possible.
 
-Storage
-  - bind mounts
-  - named volumes
-  - read-only mounts
+## 12. State and reconciliation
 
-Execution
-  - exec
-  - TTY
-  - stdin attachment
-  - signal/stop semantics
+`compose up` is desired-state reconciliation, not merely a list of create calls.
 
-Resources
-  - CPU
-  - memory
-  - GPU
-
-Images/build
-  - pull
-  - push
-  - local import/export
-  - build support
-```
-
-The planner can then produce a clear unsupported-feature diagnostic before partially executing a project.
-
-## State and reconciliation
-
-`compose up` should not be modeled only as a sequence of create calls. The engine should be able to compare desired state with observed state.
-
-Potential state identity includes:
-
-- project identity
-- service identity
-- normalized configuration digest
-- image digest
-- build result identity
-- network/volume identity
-- runtime backend identity
-
-This enables selective recreation when configuration changes instead of unconditional teardown/recreate.
+Useful identity inputs include project/service identity, normalized configuration digest, image digest, build result identity, network/volume identity and backend identity.
 
 The exact persistence model remains a research item.
 
-## Error model
+## 13. Error model
 
-Errors should retain layer identity:
+Public errors retain semantic layer identity:
 
 ```text
 SourceError
@@ -259,64 +228,54 @@ CapabilityError
 BuildError
 RuntimeError
 PlatformError
+NativeInteropError
 ```
 
-Backend-native error details should be preserved as diagnostics but should not become the public semantic error taxonomy.
+Native errors are preserved as diagnostics but translated at the integration boundary.
 
-## Observability
+## 14. Observability
 
-Execution graph actions provide natural telemetry boundaries. Useful measurements include:
+Measure parse/normalization, planning, image/build/runtime action latency, native/backend call counts, CPU/memory/I/O where relevant, cache/reconciliation decisions and FFI overhead when material.
 
-- parse/normalization time
-- planning time
-- image resolution/pull time
-- build time
-- container creation/start latency
-- health wait time
-- CPU/memory/I/O where available
-- backend API call counts/latency
-- cache/reconciliation decisions
+Metrics must detect implementations that pass tests by doing unnecessary work.
 
-This supports both performance work and detection of implementations that technically pass tests while doing unnecessary or incorrect work.
+## 15. Testing
 
-## Testing strategy
+### Compose differential tests
 
-### Unit/specification tests
+Compare canonical results against compose-go/reference behavior where meaningful.
 
-Each reusable package tests its own specification semantics.
+### Native interop tests
 
-### Differential tests
-
-For Compose, normalize known fixtures through both the Nim implementation and relevant reference implementations such as compose-go and compare canonical representations where semantics permit.
+Test ABI, ownership, cleanup, callbacks, errors, version mismatch and actual I/O for every C/C++ bridge.
 
 ### Protocol interoperability
 
-Protobuf/gRPC components should interoperate with reference implementations in other languages, not merely with themselves.
+Use upstream/native protobuf/gRPC implementations against real containerd/BuildKit endpoints; do not rely only on self-interoperability.
 
-### Backend integration tests
+### Backend integration
 
-Run equivalent execution scenarios against containerd and WSLC and compare semantic outcomes rather than backend-internal identifiers.
+Run equivalent scenarios against containerd and WSLC and compare semantic outcomes.
 
 ### Real-world corpus
 
-Maintain a corpus of real Compose configurations covering common and difficult features. This is necessary because schema-level tests alone do not exercise interaction effects among interpolation, merge, includes, paths, dependencies and runtime capabilities.
+Maintain representative Compose configurations exercising interpolation, merge, include, paths, dependencies, health conditions, volumes, networking and build.
 
 ## Dependency direction
 
-The intended dependency direction is one-way:
-
 ```text
-YAML / JSON Schema / protobuf foundations
-        |
-Compose / OCI / gRPC specification libraries
-        |
-containerd / BuildKit / WSLC clients
-        |
-NAVISOMA canonical model and planner
-        |
-runtime/build/platform implementations
-        |
-CLI
+Existing native/Nim foundations
+  YAML / JSON Schema / protobuf / gRPC / TLS
+                    |
+          thin bindings/shims/codegen
+                    |
+Compose semantics --+-- OCI vocabulary/facades
+                    |
+       containerd / BuildKit / WSLC facades
+                    |
+   canonical model + execution planner
+                    |
+                  CLI
 ```
 
-Lower-level reusable libraries must not depend on the NAVISOMA CLI or orchestration engine.
+Lower-level native libraries do not depend on NAVISOMA. Thin bindings should not absorb product semantics.
