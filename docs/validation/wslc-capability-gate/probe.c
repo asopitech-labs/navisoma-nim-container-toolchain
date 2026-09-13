@@ -59,7 +59,10 @@ static const char *kTaggedRef = "navisoma-probe-worker:ci";
 static const char *kImportRef = "navisoma-probe-import:test";
 static const char *kVolumeName = "navisoma-wslc-probe-vol";
 static const char *kContainerName = "navisoma-wslc-probe-c1";
+static const char *kPeerContainerName = "navisoma-wslc-probe-c2";
+static const char *kImportContainerName = "navisoma-wslc-probe-import";
 static const unsigned short kHostPort = 18080;
+static const unsigned short kPeerPort = 9000;
 
 static int gFailures = 0;
 
@@ -119,6 +122,140 @@ static DWORD WINAPI ioReaderThread(LPVOID param) {
         ctx->buf[ctx->len] = '\0';
     }
     return 0;
+}
+
+/*
+ * Extracts the value of a top-level `"key":"value"` string field from a
+ * WslcInspectContainer JSON blob. wslcsdk.h documents no schema for this
+ * data, so the key name used below ("IPAddress") was confirmed by printing
+ * a real inspect payload during development, not assumed -- WSLC's
+ * inspect output is docker-inspect-shaped:
+ * `"NetworkSettings":{"Networks":{"bridge":{"Gateway":"172.17.0.1",...,
+ * "IPAddress":"172.17.0.3",...}}}`. A naive "first dotted-quad in the
+ * text" scan would have matched the bridge's Gateway instead of the
+ * container's own address, since "Gateway" sorts before "IPAddress" in
+ * this payload -- this happened during development and is exactly why
+ * this looks up the named field instead.
+ */
+static int extractJsonStringField(const char *json, const char *key, char *out, size_t outSize) {
+    char pattern[64];
+    snprintf(pattern, sizeof(pattern), "\"%s\":\"", key);
+    const char *p = strstr(json, pattern);
+    if (!p) {
+        return 0;
+    }
+    p += strlen(pattern);
+    size_t i = 0;
+    while (*p && *p != '"' && i + 1 < outSize) {
+        out[i++] = *p++;
+    }
+    out[i] = '\0';
+    return i > 0;
+}
+
+typedef struct OneShotResult {
+    int created, started, waitedOk, exitOk;
+    int exitCode;
+    char stdoutBuf[512];
+    char stderrBuf[512];
+} OneShotResult;
+
+/*
+ * Creates a container from `image` with networking disabled, runs `argv` as
+ * its init process to completion, captures stdout/stderr/exit code, then
+ * stops/deletes/releases the container. Used to prove an image handed to
+ * WSLC by a path other than pull (tag, import) is actually runnable, not
+ * just accepted by the API and immediately discarded.
+ */
+static void runOneShotAndCleanup(WslcSession session, const char *containerName, const char *image,
+                                  const char *const *argvList, size_t argc, OneShotResult *out) {
+    ZeroMemory(out, sizeof(*out));
+
+    WslcContainerSettings cs __attribute__((aligned(8)));
+    ZeroMemory(&cs, sizeof(cs));
+    HRESULT hr = WslcInitContainerSettings(image, &cs);
+    if (FAILED(hr)) {
+        return;
+    }
+    (void)WslcSetContainerSettingsName(&cs, containerName);
+    (void)WslcSetContainerSettingsNetworkingMode(&cs, WSLC_CONTAINER_NETWORKING_MODE_NONE);
+
+    WslcProcessSettings proc __attribute__((aligned(8)));
+    ZeroMemory(&proc, sizeof(proc));
+    hr = WslcInitProcessSettings(&proc);
+    if (FAILED(hr)) {
+        return;
+    }
+    (void)WslcSetProcessSettingsCmdLine(&proc, argvList, argc);
+    (void)WslcSetContainerSettingsInitProcess(&cs, &proc);
+
+    WslcContainer container = NULL;
+    PWSTR err = NULL;
+    hr = WslcCreateContainer(session, &cs, &container, &err);
+    freeSdkString(err);
+    err = NULL;
+    out->created = SUCCEEDED(hr);
+    if (!out->created) {
+        return;
+    }
+
+    err = NULL;
+    hr = WslcStartContainer(container, WSLC_CONTAINER_START_FLAG_ATTACH, &err);
+    freeSdkString(err);
+    err = NULL;
+    out->started = SUCCEEDED(hr);
+
+    if (out->started) {
+        WslcProcess initProcess = NULL;
+        hr = WslcGetContainerInitProcess(container, &initProcess);
+        if (SUCCEEDED(hr) && initProcess) {
+            HANDLE hOut = NULL, hErr = NULL, hExit = NULL;
+            (void)WslcGetProcessIOHandle(initProcess, WSLC_PROCESS_IO_HANDLE_STDOUT, &hOut);
+            (void)WslcGetProcessIOHandle(initProcess, WSLC_PROCESS_IO_HANDLE_STDERR, &hErr);
+            (void)WslcGetProcessExitEvent(initProcess, &hExit);
+
+            IoReadCtx outCtx = {hOut, NULL, 0, 0};
+            IoReadCtx errCtx = {hErr, NULL, 0, 0};
+            HANDLE tOut = CreateThread(NULL, 0, ioReaderThread, &outCtx, 0, NULL);
+            HANDLE tErr = CreateThread(NULL, 0, ioReaderThread, &errCtx, 0, NULL);
+
+            DWORD waitRes = hExit ? WaitForSingleObject(hExit, 15000) : WAIT_TIMEOUT;
+            if (tOut) {
+                WaitForSingleObject(tOut, 3000);
+                CloseHandle(tOut);
+            }
+            if (tErr) {
+                WaitForSingleObject(tErr, 3000);
+                CloseHandle(tErr);
+            }
+
+            out->waitedOk = (waitRes == WAIT_OBJECT_0);
+            INT32 exitCode = -1;
+            HRESULT exitHr = WslcGetProcessExitCode(initProcess, &exitCode);
+            out->exitOk = SUCCEEDED(exitHr);
+            out->exitCode = (int)exitCode;
+            if (outCtx.buf) {
+                snprintf(out->stdoutBuf, sizeof(out->stdoutBuf), "%s", outCtx.buf);
+                free(outCtx.buf);
+            }
+            if (errCtx.buf) {
+                snprintf(out->stderrBuf, sizeof(out->stderrBuf), "%s", errCtx.buf);
+                free(errCtx.buf);
+            }
+            (void)WslcReleaseProcess(initProcess);
+        }
+
+        err = NULL;
+        hr = WslcStopContainer(container, WSLC_SIGNAL_SIGTERM, 5, &err);
+        freeSdkString(err);
+        err = NULL;
+    }
+
+    err = NULL;
+    hr = WslcDeleteContainer(container, WSLC_DELETE_CONTAINER_FLAG_FORCE, &err);
+    freeSdkString(err);
+    err = NULL;
+    (void)WslcReleaseContainer(container);
 }
 
 int main(int argc, char **argv) {
@@ -236,6 +373,13 @@ int main(int argc, char **argv) {
     }
 
     /* ---------------- 4b. build handoff, path B: import externally-produced image bytes ---------------- */
+    /*
+     * The fixture tar is a minimal real Linux rootfs (a single statically
+     * linked busybox binary at /bin/busybox, fetched over plain HTTPS from
+     * busybox.net independently of any container runtime or CLI under
+     * test) so the imported image can actually be created, started, and
+     * exec'd from below -- not just accepted and immediately deleted.
+     */
     {
         const wchar_t *tarPath = L"C:\\Users\\asopitech\\AppData\\Local\\Temp\\navisoma-wslc-probe\\import-fixture.tar";
         WslcImportImageOptions importOpts;
@@ -247,10 +391,28 @@ int main(int argc, char **argv) {
         logResult("image_import_handoff", importOk, detail);
         freeSdkString(err);
         err = NULL;
+
         if (importOk) {
+            static const char *importArgv[] = {
+                "/bin/busybox", "sh", "-c",
+                "echo navisoma-import-stdout-marker; echo navisoma-import-stderr-marker 1>&2; exit 0"};
+            OneShotResult res;
+            runOneShotAndCleanup(session, kImportContainerName, kImportRef, importArgv,
+                                  sizeof(importArgv) / sizeof(importArgv[0]), &res);
+            int runOk = res.created && res.started && res.waitedOk && res.exitOk && res.exitCode == 0 &&
+                        strstr(res.stdoutBuf, "navisoma-import-stdout-marker") != NULL &&
+                        strstr(res.stderrBuf, "navisoma-import-stderr-marker") != NULL;
+            snprintf(detail, sizeof(detail),
+                     "created=%d started=%d waitedOk=%d exitOk=%d exitCode=%d stdout=[%s] stderr=[%s]", res.created,
+                     res.started, res.waitedOk, res.exitOk, res.exitCode, res.stdoutBuf, res.stderrBuf);
+            logResult("image_import_run_verify", runOk, detail);
+
+            err = NULL;
             hr = WslcDeleteSessionImage(session, kImportRef, &err);
             freeSdkString(err);
             err = NULL;
+        } else {
+            logSkip("image_import_run_verify", "import failed");
         }
     }
 
@@ -400,8 +562,9 @@ int main(int argc, char **argv) {
         ZeroMemory(&execProc, sizeof(execProc));
         hr = WslcInitProcessSettings(&execProc);
         if (SUCCEEDED(hr)) {
-            static const char *catArgv[] = {"/bin/cat", "/mnt/probe-vol/marker.txt"};
-            (void)WslcSetProcessSettingsCmdLine(&execProc, catArgv, 2);
+            static const char *catArgv[] = {
+                "/bin/sh", "-c", "cat /mnt/probe-vol/marker.txt; echo navisoma-exec-stderr-marker 1>&2"};
+            (void)WslcSetProcessSettingsCmdLine(&execProc, catArgv, sizeof(catArgv) / sizeof(catArgv[0]));
 
             WslcProcess execProcess = NULL;
             err = NULL;
@@ -431,11 +594,13 @@ int main(int argc, char **argv) {
                 INT32 exitCode = -1;
                 hr = WslcGetProcessExitCode(execProcess, &exitCode);
                 int volumeReadOk = (outCtx.buf && strstr(outCtx.buf, "navisoma-volume-marker") != NULL);
+                int stderrOk = (errCtx.buf && strstr(errCtx.buf, "navisoma-exec-stderr-marker") != NULL);
                 snprintf(detail, sizeof(detail),
                             "waitRes=%lu exitCodeHr=0x%08lX exitCode=%d stdout=[%s] stderr=[%s]",
                             (unsigned long)waitRes, (unsigned long)hr, (int)exitCode,
                             outCtx.buf ? outCtx.buf : "", errCtx.buf ? errCtx.buf : "");
-                logResult("process_stdio_exit_status", (waitRes == WAIT_OBJECT_0 && SUCCEEDED(hr) && exitCode == 0), detail);
+                logResult("process_stdio_exit_status",
+                          (waitRes == WAIT_OBJECT_0 && SUCCEEDED(hr) && exitCode == 0 && stderrOk), detail);
                 logResult("named_volume_mount", volumeReadOk, volumeReadOk ? "marker read back through exec" : "marker not observed");
 
                 if (outCtx.buf) free(outCtx.buf);
@@ -450,6 +615,127 @@ int main(int argc, char **argv) {
         logSkip("process_exec", "container not started");
         logSkip("process_stdio_exit_status", "container not started");
         logSkip("named_volume_mount", "container not started");
+    }
+
+    /*
+     * ---------------- 6d. network: intra-session service-to-service
+     * connectivity ----------------
+     * #14 case 1 needs a project's services to reach each other over one
+     * named network, not just a published host port. WSLC has no named
+     * network object (see the doc's note), so the claim under test is that
+     * one BRIDGED-mode session already gives every container in it mutual
+     * reachability. Proven here with a second container in the SAME
+     * session that c1 reaches over its container IP with no host port
+     * involved.
+     */
+    if (containerStarted) {
+        WslcContainerSettings cs2 __attribute__((aligned(8)));
+        ZeroMemory(&cs2, sizeof(cs2));
+        hr = WslcInitContainerSettings(runImage, &cs2);
+        WslcContainer peer = NULL;
+        int peerCreated = 0, peerStarted = 0;
+        if (SUCCEEDED(hr)) {
+            (void)WslcSetContainerSettingsName(&cs2, kPeerContainerName);
+            (void)WslcSetContainerSettingsNetworkingMode(&cs2, WSLC_CONTAINER_NETWORKING_MODE_BRIDGED);
+
+            WslcProcessSettings peerInit __attribute__((aligned(8)));
+            ZeroMemory(&peerInit, sizeof(peerInit));
+            hr = WslcInitProcessSettings(&peerInit);
+            if (SUCCEEDED(hr)) {
+                char peerCmd[128];
+                snprintf(peerCmd, sizeof(peerCmd),
+                         "i=0; while [ $i -lt 40 ]; do echo navisoma-peer-ok | nc -l -p %u; i=$((i+1)); done",
+                         kPeerPort);
+                const char *peerArgv[] = {"/bin/sh", "-c", peerCmd};
+                (void)WslcSetProcessSettingsCmdLine(&peerInit, peerArgv, 3);
+                (void)WslcSetContainerSettingsInitProcess(&cs2, &peerInit);
+            }
+
+            err = NULL;
+            hr = WslcCreateContainer(session, &cs2, &peer, &err);
+            peerCreated = SUCCEEDED(hr);
+            freeSdkString(err);
+            err = NULL;
+        }
+
+        if (peerCreated) {
+            err = NULL;
+            hr = WslcStartContainer(peer, WSLC_CONTAINER_START_FLAG_ATTACH, &err);
+            peerStarted = SUCCEEDED(hr);
+            freeSdkString(err);
+            err = NULL;
+        }
+
+        char peerIp[32] = {0};
+        int gotIp = 0;
+        if (peerStarted) {
+            Sleep(1500); /* let the peer's listener come up */
+            PSTR inspect = NULL;
+            hr = WslcInspectContainer(peer, &inspect);
+            if (SUCCEEDED(hr) && inspect) {
+                gotIp = extractJsonStringField(inspect, "IPAddress", peerIp, sizeof(peerIp));
+                CoTaskMemFree(inspect);
+            }
+        }
+        logResult("peer_container_ip_inspect", gotIp, gotIp ? peerIp : "no IPv4 substring found in inspect data");
+
+        int connectOk = 0;
+        if (gotIp) {
+            WslcProcessSettings clientProc __attribute__((aligned(8)));
+            ZeroMemory(&clientProc, sizeof(clientProc));
+            hr = WslcInitProcessSettings(&clientProc);
+            if (SUCCEEDED(hr)) {
+                char cmd[160];
+                snprintf(cmd, sizeof(cmd), "nc -w 3 %s %u", peerIp, kPeerPort);
+                const char *clientArgv[] = {"/bin/sh", "-c", cmd};
+                (void)WslcSetProcessSettingsCmdLine(&clientProc, clientArgv, 3);
+
+                WslcProcess clientExec = NULL;
+                err = NULL;
+                hr = WslcCreateContainerProcess(container, &clientProc, &clientExec, &err);
+                freeSdkString(err);
+                err = NULL;
+                if (SUCCEEDED(hr)) {
+                    HANDLE hOut2 = NULL, hExit2 = NULL;
+                    (void)WslcGetProcessIOHandle(clientExec, WSLC_PROCESS_IO_HANDLE_STDOUT, &hOut2);
+                    (void)WslcGetProcessExitEvent(clientExec, &hExit2);
+                    IoReadCtx outCtx2 = {hOut2, NULL, 0, 0};
+                    HANDLE tOut2 = CreateThread(NULL, 0, ioReaderThread, &outCtx2, 0, NULL);
+                    DWORD waitRes2 = hExit2 ? WaitForSingleObject(hExit2, 10000) : WAIT_TIMEOUT;
+                    if (tOut2) {
+                        WaitForSingleObject(tOut2, 3000);
+                        CloseHandle(tOut2);
+                    }
+                    connectOk = (outCtx2.buf && strstr(outCtx2.buf, "navisoma-peer-ok") != NULL);
+                    snprintf(detail, sizeof(detail), "peerIp=%s waitRes=%lu stdout=[%s]", peerIp,
+                             (unsigned long)waitRes2, outCtx2.buf ? outCtx2.buf : "");
+                    if (outCtx2.buf) free(outCtx2.buf);
+                    (void)WslcReleaseProcess(clientExec);
+                } else {
+                    snprintf(detail, sizeof(detail), "exec into c1 to reach peer failed");
+                }
+            }
+        } else {
+            snprintf(detail, sizeof(detail), "no peer IP available");
+        }
+        logResult("intra_session_service_connectivity", connectOk, detail);
+
+        if (peerStarted) {
+            err = NULL;
+            hr = WslcStopContainer(peer, WSLC_SIGNAL_SIGTERM, 5, &err);
+            freeSdkString(err);
+            err = NULL;
+        }
+        if (peerCreated) {
+            err = NULL;
+            hr = WslcDeleteContainer(peer, WSLC_DELETE_CONTAINER_FLAG_FORCE, &err);
+            freeSdkString(err);
+            err = NULL;
+            (void)WslcReleaseContainer(peer);
+        }
+    } else {
+        logSkip("peer_container_ip_inspect", "container not started");
+        logSkip("intra_session_service_connectivity", "container not started");
     }
 
     if (initProcess) {

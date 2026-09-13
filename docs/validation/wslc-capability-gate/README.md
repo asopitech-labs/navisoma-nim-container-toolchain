@@ -43,12 +43,35 @@ zig cc -target x86_64-windows-gnu \
 the same directory at run time; `wslcsdk.dll` is not preinstalled elsewhere
 on the host, only the higher-level `wslc.exe`/`wslservice.exe` are.
 
+## Import-handoff fixture
+
+`import-fixture.tar`, referenced from the probe at a fixed Windows path
+(`%TEMP%\navisoma-wslc-probe\import-fixture.tar`), must also be present at
+run time. It is a minimal but genuinely runnable Linux root filesystem — a
+single statically linked `busybox` binary at `/bin/busybox` — built from a
+binary fetched over plain HTTPS from
+`https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox`
+(SHA-256 `6e123e7f3202a8c1e9b1f94d8941580a25135382b99e8d3e34fb858bba31134`),
+independent of WSLC/BuildKit/any container runtime:
+
+```bash
+mkdir -p rootfs-fixture/bin
+cp busybox rootfs-fixture/bin/busybox
+chmod 755 rootfs-fixture/bin/busybox
+tar --owner=0 --group=0 -C rootfs-fixture -cf import-fixture.tar bin
+```
+
+Resulting tar SHA-256: `682263d1c30309ffa85fd5ddfab8a189a4763c907edc0f9e563a1eed7bc9e60e`.
+This is what proves `WslcImportSessionImageFromFile`'s image is actually
+runnable (`image_import_run_verify` in the doc) rather than just accepted
+and immediately deleted.
+
 ## Run
 
 The probe takes no arguments and uses fixed, deterministic resource names
-(session `navisoma-wslc-probe`, container `navisoma-wslc-probe-c1`, volume
-`navisoma-wslc-probe-vol`, image tags under `navisoma-probe-*`) so that
-running it twice in a row only succeeds the second time if the first run's
-cleanup was complete — see
+(session `navisoma-wslc-probe`, containers `navisoma-wslc-probe-c1`/`-c2`/`-import`,
+volume `navisoma-wslc-probe-vol`, image tags under `navisoma-probe-*`) so
+that running it twice in a row only succeeds the second time if the first
+run's cleanup was complete — see
 [`../wslc-capability-gate.md`](../wslc-capability-gate.md) for the two
 recorded runs and the resulting capability table.
