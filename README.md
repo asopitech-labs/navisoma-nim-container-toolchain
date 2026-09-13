@@ -114,6 +114,7 @@ Compatibility claims require specification/reference/differential tests and real
 - [`docs/native-library-reuse.md`](docs/native-library-reuse.md) — detailed C/C++ reuse research and FFI strategy.
 - [`docs/c-cpp-integration-assets.md`](docs/c-cpp-integration-assets.md) — concrete C/C++ asset inventory and per-component reuse analysis.
 - [`docs/native-c-cpp-integration-plan.md`](docs/native-c-cpp-integration-plan.md) — locked implementation paths for WSLC, protobuf/gRPC, containerd, BuildKit, JSON Schema, ABI, code generation, native builds and dependency packaging.
+- [`docs/validation/work-instruction-policy.md`](docs/validation/work-instruction-policy.md) — evidence contract and review rules for validation work.
 - [`docs/architecture.md`](docs/architecture.md) — semantic core, native integration boundaries, backends, and testing.
 - [`docs/repository-strategy.md`](docs/repository-strategy.md) — extraction criteria and reduced repository plan.
 
