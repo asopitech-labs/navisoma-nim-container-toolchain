@@ -9,12 +9,16 @@
   (`network.named` as a project-scoped resource with its own
   create/remove lifecycle) does not hold on WSLC at all
   ([`gate-13-decision.md`](gate-13-decision.md)).
-- #16 closed as: no end-to-end health gate exists in Docker Compose,
-  containerd/nerdctl, or the WSLC SDK family, for the fixed
-  `depends_on: condition: service_healthy` case — but that absence does
-  not by itself establish that NAVISOMA must own this as an irreducible,
-  non-substitutable core; it is recorded as an integration responsibility
-  that can be built on top of generic exec/lifecycle primitives
+- #16 closed as: none of the three selected tool families — Docker
+  Compose, containerd/nerdctl, or the WSLC SDK family — executes the
+  fixed `depends_on: condition: service_healthy` case as an end-to-end
+  health gate against both containerd and WSLC under the same contract
+  (Docker Compose has its own health gate, but reaches only the Docker
+  Engine API, never containerd's or WSLC's own client API) — but that
+  absence does not by itself establish that NAVISOMA must own this as an
+  irreducible, non-substitutable core; it is recorded as an integration
+  responsibility that can be built on top of generic exec/lifecycle
+  primitives
   ([`irreducible-core-counterfactual.md`](irreducible-core-counterfactual.md)).
 - Reading #1–#12 against those two closed decisions: every issue that
   assumes NAVISOMA directly owns Compose semantic processing, a
