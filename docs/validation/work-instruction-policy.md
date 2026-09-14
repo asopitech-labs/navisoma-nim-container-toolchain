@@ -77,6 +77,14 @@ contract establishes that the boundary is symmetric. One failed directed
 connection proves only that directed attempt, never the broad label
 "isolated".
 
+An IP address observed inside a network namespace is not a globally unique
+target identity. Renumbering containers until their address strings differ
+does not fix an overlapping-address ambiguity: the source namespace can still
+route that string to its own container or to no container at all. Use a route
+whose endpoint identity is observable from both sides. If the platform exposes
+no such route, record the address-space boundary that was observed but leave
+cross-project reachability/isolation `unverified`.
+
 ### Assertion-to-report traceability
 
 Every stated oracle must map to a single boolean predicate in the probe. A
@@ -84,6 +92,10 @@ value printed only in a diagnostic string, or asserted only by a different
 CHECK row, does not satisfy that row's oracle. Independent review must trace
 each `supported` result from its prose oracle to the exact predicate and its
 inputs.
+
+For a required capability, `SKIP` or any other inconclusive result must make
+the probe/harness exit non-zero and leave the capability unverified. A run
+that exits successfully must not contain a skipped required CHECK.
 
 ### External artifact provenance
 
