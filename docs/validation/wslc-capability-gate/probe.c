@@ -258,6 +258,77 @@ static void runOneShotAndCleanup(WslcSession session, const char *containerName,
     (void)WslcReleaseContainer(container);
 }
 
+typedef struct ExecResult {
+    int execOk, waitedOk, exitOk;
+    int exitCode;
+    char stdoutBuf[512];
+    char stderrBuf[512];
+} ExecResult;
+
+/*
+ * Runs `argvList` as a new exec'd process inside an already-running
+ * container and captures stdout/stderr/exit code. Factored out so the
+ * same mechanism can be exercised more than once against one container,
+ * per docs/validation/work-instruction-policy.md's rule that a recurring
+ * operation must prove a second invocation, not just one.
+ */
+static void execInRunningContainer(WslcContainer container, const char *const *argvList, size_t argc, ExecResult *out) {
+    ZeroMemory(out, sizeof(*out));
+
+    WslcProcessSettings proc __attribute__((aligned(8)));
+    ZeroMemory(&proc, sizeof(proc));
+    HRESULT hr = WslcInitProcessSettings(&proc);
+    if (FAILED(hr)) {
+        return;
+    }
+    (void)WslcSetProcessSettingsCmdLine(&proc, argvList, argc);
+
+    WslcProcess execProcess = NULL;
+    PWSTR err = NULL;
+    hr = WslcCreateContainerProcess(container, &proc, &execProcess, &err);
+    freeSdkString(err);
+    err = NULL;
+    out->execOk = SUCCEEDED(hr);
+    if (!out->execOk) {
+        return;
+    }
+
+    HANDLE hOut = NULL, hErr = NULL, hExit = NULL;
+    (void)WslcGetProcessIOHandle(execProcess, WSLC_PROCESS_IO_HANDLE_STDOUT, &hOut);
+    (void)WslcGetProcessIOHandle(execProcess, WSLC_PROCESS_IO_HANDLE_STDERR, &hErr);
+    (void)WslcGetProcessExitEvent(execProcess, &hExit);
+
+    IoReadCtx outCtx = {hOut, NULL, 0, 0};
+    IoReadCtx errCtx = {hErr, NULL, 0, 0};
+    HANDLE tOut = CreateThread(NULL, 0, ioReaderThread, &outCtx, 0, NULL);
+    HANDLE tErr = CreateThread(NULL, 0, ioReaderThread, &errCtx, 0, NULL);
+
+    DWORD waitRes = hExit ? WaitForSingleObject(hExit, 15000) : WAIT_TIMEOUT;
+    if (tOut) {
+        WaitForSingleObject(tOut, 3000);
+        CloseHandle(tOut);
+    }
+    if (tErr) {
+        WaitForSingleObject(tErr, 3000);
+        CloseHandle(tErr);
+    }
+
+    out->waitedOk = (waitRes == WAIT_OBJECT_0);
+    INT32 exitCode = -1;
+    HRESULT exitHr = WslcGetProcessExitCode(execProcess, &exitCode);
+    out->exitOk = SUCCEEDED(exitHr);
+    out->exitCode = (int)exitCode;
+    if (outCtx.buf) {
+        snprintf(out->stdoutBuf, sizeof(out->stdoutBuf), "%s", outCtx.buf);
+        free(outCtx.buf);
+    }
+    if (errCtx.buf) {
+        snprintf(out->stderrBuf, sizeof(out->stderrBuf), "%s", errCtx.buf);
+        free(errCtx.buf);
+    }
+    (void)WslcReleaseProcess(execProcess);
+}
+
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
@@ -556,65 +627,50 @@ int main(int argc, char **argv) {
         logSkip("published_port_tcp", "container not started");
     }
 
-    /* ---------------- 6c. process stdout/stderr + exit status (exec into running container) ---------------- */
+    /*
+     * ---------------- 6c. process stdout/stderr + exit status, invoked
+     * twice (exec into running container) ----------------
+     * Two independent WslcCreateContainerProcess calls against the same
+     * running container, each with its own distinct stdout/stderr markers,
+     * so "recurring" is demonstrated as a second real invocation of the
+     * mechanism rather than inferred from a single call.
+     */
     if (containerStarted) {
-        WslcProcessSettings execProc __attribute__((aligned(8)));
-        ZeroMemory(&execProc, sizeof(execProc));
-        hr = WslcInitProcessSettings(&execProc);
-        if (SUCCEEDED(hr)) {
-            static const char *catArgv[] = {
-                "/bin/sh", "-c", "cat /mnt/probe-vol/marker.txt; echo navisoma-exec-stderr-marker 1>&2"};
-            (void)WslcSetProcessSettingsCmdLine(&execProc, catArgv, sizeof(catArgv) / sizeof(catArgv[0]));
+        static const char *catArgv[] = {
+            "/bin/sh", "-c", "cat /mnt/probe-vol/marker.txt; echo navisoma-exec-stderr-marker 1>&2"};
+        ExecResult r1;
+        execInRunningContainer(container, catArgv, sizeof(catArgv) / sizeof(catArgv[0]), &r1);
+        logResult("process_exec", r1.execOk, "");
 
-            WslcProcess execProcess = NULL;
-            err = NULL;
-            hr = WslcCreateContainerProcess(container, &execProc, &execProcess, &err);
-            int execOk = SUCCEEDED(hr);
-            describeHr(hr, err, detail, sizeof(detail));
-            logResult("process_exec", execOk, detail);
-            freeSdkString(err);
-            err = NULL;
+        if (r1.execOk) {
+            int volumeReadOk = strstr(r1.stdoutBuf, "navisoma-volume-marker") != NULL;
+            int stderrOk = strstr(r1.stderrBuf, "navisoma-exec-stderr-marker") != NULL;
+            snprintf(detail, sizeof(detail), "waitedOk=%d exitOk=%d exitCode=%d stdout=[%s] stderr=[%s]", r1.waitedOk,
+                     r1.exitOk, r1.exitCode, r1.stdoutBuf, r1.stderrBuf);
+            logResult("process_stdio_exit_status",
+                      (r1.waitedOk && r1.exitOk && r1.exitCode == 0 && stderrOk), detail);
+            logResult("named_volume_mount", volumeReadOk, volumeReadOk ? "marker read back through exec" : "marker not observed");
 
-            if (execOk) {
-                HANDLE hOut = NULL, hErr = NULL, hExit = NULL;
-                (void)WslcGetProcessIOHandle(execProcess, WSLC_PROCESS_IO_HANDLE_STDOUT, &hOut);
-                (void)WslcGetProcessIOHandle(execProcess, WSLC_PROCESS_IO_HANDLE_STDERR, &hErr);
-                (void)WslcGetProcessExitEvent(execProcess, &hExit);
-
-                IoReadCtx outCtx = {hOut, NULL, 0, 0};
-                IoReadCtx errCtx = {hErr, NULL, 0, 0};
-                HANDLE tOut = CreateThread(NULL, 0, ioReaderThread, &outCtx, 0, NULL);
-                HANDLE tErr = CreateThread(NULL, 0, ioReaderThread, &errCtx, 0, NULL);
-
-                DWORD waitRes = hExit ? WaitForSingleObject(hExit, 15000) : WAIT_TIMEOUT;
-
-                if (tOut) { WaitForSingleObject(tOut, 3000); CloseHandle(tOut); }
-                if (tErr) { WaitForSingleObject(tErr, 3000); CloseHandle(tErr); }
-
-                INT32 exitCode = -1;
-                hr = WslcGetProcessExitCode(execProcess, &exitCode);
-                int volumeReadOk = (outCtx.buf && strstr(outCtx.buf, "navisoma-volume-marker") != NULL);
-                int stderrOk = (errCtx.buf && strstr(errCtx.buf, "navisoma-exec-stderr-marker") != NULL);
-                snprintf(detail, sizeof(detail),
-                            "waitRes=%lu exitCodeHr=0x%08lX exitCode=%d stdout=[%s] stderr=[%s]",
-                            (unsigned long)waitRes, (unsigned long)hr, (int)exitCode,
-                            outCtx.buf ? outCtx.buf : "", errCtx.buf ? errCtx.buf : "");
-                logResult("process_stdio_exit_status",
-                          (waitRes == WAIT_OBJECT_0 && SUCCEEDED(hr) && exitCode == 0 && stderrOk), detail);
-                logResult("named_volume_mount", volumeReadOk, volumeReadOk ? "marker read back through exec" : "marker not observed");
-
-                if (outCtx.buf) free(outCtx.buf);
-                if (errCtx.buf) free(errCtx.buf);
-                (void)WslcReleaseProcess(execProcess);
-            } else {
-                logSkip("process_stdio_exit_status", "exec failed");
-                logSkip("named_volume_mount", "exec failed");
-            }
+            static const char *secondArgv[] = {
+                "/bin/sh", "-c", "echo navisoma-exec2-stdout-marker; echo navisoma-exec2-stderr-marker 1>&2"};
+            ExecResult r2;
+            execInRunningContainer(container, secondArgv, sizeof(secondArgv) / sizeof(secondArgv[0]), &r2);
+            int r2StdoutOk = strstr(r2.stdoutBuf, "navisoma-exec2-stdout-marker") != NULL;
+            int r2StderrOk = strstr(r2.stderrBuf, "navisoma-exec2-stderr-marker") != NULL;
+            snprintf(detail, sizeof(detail), "execOk=%d waitedOk=%d exitOk=%d exitCode=%d stdout=[%s] stderr=[%s]",
+                     r2.execOk, r2.waitedOk, r2.exitOk, r2.exitCode, r2.stdoutBuf, r2.stderrBuf);
+            logResult("process_exec_second_invocation",
+                      (r2.execOk && r2.waitedOk && r2.exitOk && r2.exitCode == 0 && r2StdoutOk && r2StderrOk), detail);
+        } else {
+            logSkip("process_stdio_exit_status", "exec failed");
+            logSkip("named_volume_mount", "exec failed");
+            logSkip("process_exec_second_invocation", "first exec failed");
         }
     } else {
         logSkip("process_exec", "container not started");
         logSkip("process_stdio_exit_status", "container not started");
         logSkip("named_volume_mount", "container not started");
+        logSkip("process_exec_second_invocation", "container not started");
     }
 
     /*
@@ -764,6 +820,20 @@ int main(int argc, char **argv) {
 
         hr = WslcReleaseContainer(container);
         logResult("container_release", SUCCEEDED(hr), "");
+
+        /*
+         * Cleanup postcondition, not just the delete call's own return
+         * code: look the container up by name again and require that
+         * lookup to now fail. A container handle's own S_OK on delete is
+         * not, by itself, proof the container is actually gone.
+         */
+        WslcContainer reopened = NULL;
+        HRESULT reopenHr = WslcOpenContainer(session, kContainerName, &reopened, NULL);
+        snprintf(detail, sizeof(detail), "reopen hr=0x%08lX (expected FAILED = truly deleted)", (unsigned long)reopenHr);
+        logResult("container_delete_postcondition", FAILED(reopenHr), detail);
+        if (SUCCEEDED(reopenHr)) {
+            (void)WslcReleaseContainer(reopened);
+        }
     }
 
     /* ---------------- 8. teardown: volume / images ---------------- */
@@ -772,6 +842,15 @@ int main(int argc, char **argv) {
         hr = WslcDeleteSessionVhdVolume(session, kVolumeName, &err);
         describeHr(hr, err, detail, sizeof(detail));
         logResult("volume_delete", SUCCEEDED(hr), detail);
+        freeSdkString(err);
+        err = NULL;
+
+        /* Postcondition: deleting the same name again must now fail. */
+        err = NULL;
+        HRESULT secondDeleteHr = WslcDeleteSessionVhdVolume(session, kVolumeName, &err);
+        snprintf(detail, sizeof(detail), "second delete hr=0x%08lX (expected FAILED = truly deleted)",
+                 (unsigned long)secondDeleteHr);
+        logResult("volume_delete_postcondition", FAILED(secondDeleteHr), detail);
         freeSdkString(err);
         err = NULL;
     }
@@ -792,6 +871,28 @@ int main(int argc, char **argv) {
         logResult("image_pull_delete", SUCCEEDED(hr), detail);
         freeSdkString(err);
         err = NULL;
+
+        /*
+         * Postcondition: re-list the session's images and require the
+         * deleted name to actually be gone from it, not just trust the
+         * delete call's own return code.
+         */
+        WslcImageInfo *imagesAfter = NULL;
+        uint32_t countAfter = 0;
+        HRESULT listHr = WslcListSessionImages(session, &imagesAfter, &countAfter);
+        int stillPresent = 0;
+        if (SUCCEEDED(listHr) && imagesAfter) {
+            for (uint32_t i = 0; i < countAfter; i++) {
+                if (strstr(imagesAfter[i].name, "alpine") != NULL) {
+                    stillPresent = 1;
+                    break;
+                }
+            }
+            CoTaskMemFree(imagesAfter);
+        }
+        snprintf(detail, sizeof(detail), "listHr=0x%08lX countAfter=%u alpineStillPresent=%d",
+                 (unsigned long)listHr, countAfter, stillPresent);
+        logResult("image_pull_delete_postcondition", SUCCEEDED(listHr) && !stillPresent, detail);
     }
 
     /* ---------------- 9. teardown: session terminate/release ---------------- */

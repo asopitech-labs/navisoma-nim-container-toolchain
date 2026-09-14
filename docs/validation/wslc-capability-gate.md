@@ -88,6 +88,20 @@ a second time from what should be a clean state only succeeds if the first
 run's cleanup was actually complete — reusing the same session name would
 fail with `WSLC_E_SESSION_RESERVED` otherwise.
 
+## Policy compliance
+
+[`docs/validation/work-instruction-policy.md`](work-instruction-policy.md)
+was added to this repository while this issue was in review and now
+governs validation work under `docs/validation/`. This document (and the
+probe it describes) were revised to comply with it after the fact,
+per that policy's own rule that review findings replace a conclusion
+rather than append a caveat to it: the "Capability proof contracts"
+section below states, for each of #14's five required capabilities, the
+claim, stimulus, oracle, negative condition, consumer proof, cleanup
+owner/postcondition, and boundary, and `unverified`/`capability-gated` are
+used explicitly for the two things this spike did not or cannot confirm,
+rather than folding them into prose under a bare `supported`.
+
 ## Runs
 
 Both runs used the identical `probe.exe` + `wslcsdk.dll`, invoked with no
@@ -109,17 +123,21 @@ CHECK container_create             PASS hr=0x00000000
 CHECK container_start              PASS hr=0x00000000
 CHECK container_init_process_handle PASS
 CHECK published_port_tcp           PASS connected=1 bytes=17 payload=navisoma-port-ok
-CHECK process_exec                 PASS hr=0x00000000
-CHECK process_stdio_exit_status    PASS waitRes=0 exitCodeHr=0x00000000 exitCode=0 stdout=[navisoma-volume-marker] stderr=[navisoma-exec-stderr-marker]
+CHECK process_exec                 PASS
+CHECK process_stdio_exit_status    PASS waitedOk=1 exitOk=1 exitCode=0 stdout=[navisoma-volume-marker] stderr=[navisoma-exec-stderr-marker]
 CHECK named_volume_mount           PASS marker read back through exec
+CHECK process_exec_second_invocation PASS execOk=1 waitedOk=1 exitOk=1 exitCode=0 stdout=[navisoma-exec2-stdout-marker] stderr=[navisoma-exec2-stderr-marker]
 CHECK peer_container_ip_inspect    PASS 172.17.0.3
 CHECK intra_session_service_connectivity PASS peerIp=172.17.0.3 waitRes=0 stdout=[navisoma-peer-ok]
 CHECK container_stop               PASS hr=0x00000000
 CHECK container_delete             PASS hr=0x00000000
 CHECK container_release            PASS
+CHECK container_delete_postcondition PASS reopen hr=0x80040603 (expected FAILED = truly deleted)
 CHECK volume_delete                PASS hr=0x00000000
+CHECK volume_delete_postcondition  PASS second delete hr=0x80040604 (expected FAILED = truly deleted)
 CHECK image_tag_delete             PASS hr=0x00000000
 CHECK image_pull_delete            PASS hr=0x00000000
+CHECK image_pull_delete_postcondition PASS listHr=0x00000000 countAfter=0 alpineStillPresent=0
 CHECK session_terminate            PASS
 CHECK session_release              PASS
 PROBE_DONE failures=0
@@ -128,8 +146,10 @@ PROBE_DONE failures=0
 ### Run 2 (immediately after run 1, no manual cleanup)
 
 Identical outcome on every line, including `session_create PASS` reusing
-the exact same session name with no `WSLC_E_SESSION_RESERVED` collision,
-and the peer container getting the exact same bridge IP again:
+the exact same session name, the peer container getting the exact same
+bridge IP again, and `WSLC_E_CONTAINER_NOT_FOUND` (`0x80040603`) /
+`WSLC_E_VOLUME_NOT_FOUND` (`0x80040604`) — the SDK's own documented codes —
+coming back on the post-delete lookups both times:
 
 ```
 CHECK missing_components           PASS missingFlags=0x00000000 (0=nothing missing)
@@ -145,17 +165,21 @@ CHECK container_create             PASS hr=0x00000000
 CHECK container_start              PASS hr=0x00000000
 CHECK container_init_process_handle PASS
 CHECK published_port_tcp           PASS connected=1 bytes=17 payload=navisoma-port-ok
-CHECK process_exec                 PASS hr=0x00000000
-CHECK process_stdio_exit_status    PASS waitRes=0 exitCodeHr=0x00000000 exitCode=0 stdout=[navisoma-volume-marker] stderr=[navisoma-exec-stderr-marker]
+CHECK process_exec                 PASS
+CHECK process_stdio_exit_status    PASS waitedOk=1 exitOk=1 exitCode=0 stdout=[navisoma-volume-marker] stderr=[navisoma-exec-stderr-marker]
 CHECK named_volume_mount           PASS marker read back through exec
+CHECK process_exec_second_invocation PASS execOk=1 waitedOk=1 exitOk=1 exitCode=0 stdout=[navisoma-exec2-stdout-marker] stderr=[navisoma-exec2-stderr-marker]
 CHECK peer_container_ip_inspect    PASS 172.17.0.3
 CHECK intra_session_service_connectivity PASS peerIp=172.17.0.3 waitRes=0 stdout=[navisoma-peer-ok]
 CHECK container_stop               PASS hr=0x00000000
 CHECK container_delete             PASS hr=0x00000000
 CHECK container_release            PASS
+CHECK container_delete_postcondition PASS reopen hr=0x80040603 (expected FAILED = truly deleted)
 CHECK volume_delete                PASS hr=0x00000000
+CHECK volume_delete_postcondition  PASS second delete hr=0x80040604 (expected FAILED = truly deleted)
 CHECK image_tag_delete             PASS hr=0x00000000
 CHECK image_pull_delete            PASS hr=0x00000000
+CHECK image_pull_delete_postcondition PASS listHr=0x00000000 countAfter=0 alpineStillPresent=0
 CHECK session_terminate            PASS
 CHECK session_release              PASS
 PROBE_DONE failures=0
@@ -163,13 +187,28 @@ PROBE_DONE failures=0
 
 ### Cleanup verification
 
-The primary evidence for complete cleanup is the probe's own C API result,
-not the CLI: run 2 reused the exact same fixed session, container, volume,
-and image names as run 1 and every step still returned `S_OK`. Had run 1's
-`WslcTerminateSession`/`WslcReleaseSession`/`WslcDeleteContainer`/`WslcDeleteSessionVhdVolume`/`WslcDeleteSessionImage`
-calls left anything behind, `session_create` (or a downstream step) in run 2
-would have failed — `WslcCreateSession` returns `WSLC_E_SESSION_RESERVED`
-for a name still in use. It did not; every step passed identically twice.
+Per the policy's cleanup rule, SDK-owned and caller-owned cleanup are
+reported and evidenced separately, not conflated into one "it cleaned up"
+claim:
+
+- **SDK-owned runtime state** (container, volume, image, session): each
+  deletion's *own* postcondition is checked, not just its return code —
+  `container_delete_postcondition` re-opens the container by name and
+  requires that to fail (`WSLC_E_CONTAINER_NOT_FOUND`, `0x80040603`),
+  `volume_delete_postcondition` deletes the same volume name again and
+  requires that second delete to fail (`WSLC_E_VOLUME_NOT_FOUND`,
+  `0x80040604`), and `image_pull_delete_postcondition` re-lists the
+  session's images and requires the deleted name to actually be absent
+  (`countAfter=0`). All three passed on both runs. Run 2 also reusing every
+  fixed name without `WSLC_E_SESSION_RESERVED` is corroborating evidence at
+  the session level, but the postcondition checks are the primary evidence
+  now, not name-reuse alone.
+- **Caller-owned state** (the `storagePath` directory given to
+  `WslcInitSessionSettings`, and the probe's own staged files): the SDK
+  does not delete this on `WslcTerminateSession`/`WslcReleaseSession` —
+  observed directly, the directory was still present after both runs —
+  and it was removed manually as part of closing out the spike. See
+  "Production implication" below.
 
 `wslc.exe list -a` / `wslc.exe images` were tried afterward purely as an
 incidental, non-authoritative human sanity check (consistent with not
@@ -177,17 +216,8 @@ treating CLI output as capability evidence either way) and errored with a
 generic `E_FAIL` against the host's unrelated, pre-existing default CLI
 session (`wslc-cli-asopitech`, present on this host before this spike
 started) — a CLI-only observation this gate does not rely on and that has
-no bearing on the capability table below, since the probe never touched
-that session.
-
-The only on-disk residue after both runs was the probe's own session's
-VHDX-backed storage directory at the caller-supplied `storagePath` —
-expected: `WslcTerminateSession`/`WslcReleaseSession` end the runtime
-session but the SDK exposes no call to delete the storage directory
-itself, the same way stopping a VM doesn't delete its disk file. That
-directory (and the probe's fixture files) were created solely for this
-spike and were removed manually afterward. No probe-created resource
-remains on the host.
+no bearing on the capability proof contracts below, since the probe never
+touched that session.
 
 **Production implication:** cleanup here is not fully automatic, and this
 is not a WSLC defect to work around — `storagePath` is caller-supplied in
@@ -199,78 +229,117 @@ way it already owns cleanup for any other backend's on-disk state. This
 should be written down as a lowering-adapter obligation for the WSLC
 backend in the detailed model/graph work, not left implicit.
 
-## Capability table
+## Capability proof contracts (#14's five required capabilities)
 
-| Capability (from #14) | WSLC C API entry points used | Result |
+Applied in full to the five capabilities #14 named as required and
+therefore under the most scrutiny. The baseline SDK lifecycle operations
+(session/container/image CRUD) are reported in the simpler table further
+below — they are supporting infrastructure for these five, evidenced
+directly by the raw `CHECK` output and the postconditions above, not
+separate product-relevant capability claims in their own right.
+
+### 1. `process.exec.recurring`
+
+| Field | Content |
+|---|---|
+| Claim | A process can be exec'd into a running WSLC container, its stdout and stderr can both be read, its exit code retrieved, and the same mechanism invoked again against the same container. |
+| Stimulus | `WslcCreateContainerProcess` with `/bin/sh -c "cat <volume file>; echo navisoma-exec-stderr-marker 1>&2"`, then a second, independent `WslcCreateContainerProcess` with `/bin/sh -c "echo navisoma-exec2-stdout-marker; echo navisoma-exec2-stderr-marker 1>&2"` against the same container. |
+| Oracle | `WslcGetProcessIOHandle` reads on both `STDOUT`/`STDERR` contain their respective distinct markers, `WslcGetProcessExitCode` returns `0`, for *both* invocations. |
+| Negative condition | Either invocation's stderr buffer missing its marker (this is exactly what the first version of this probe would have missed, since it never emitted stderr at all), a non-zero/unavailable exit code, or the second invocation failing outright. |
+| Consumer proof | `named_volume_mount` (below) consumes the first exec's stdout content as its own evidence; the second exec's sole purpose is proving repeatability. |
+| Cleanup owner | The exec'd process itself is released via `WslcReleaseProcess`; no independent resource survives it to clean up. |
+| Boundary | This proves the primitive a scheduler would call repeatedly, not a real scheduler loop with real intervals/retries/timeouts — that logic doesn't exist yet and is planner-owned, not a WSLC capability. |
+| **Result** | **supported** |
+
+### 2. `network.named.isolated` (#14 case 1: one named network per project)
+
+| Field | Content |
+|---|---|
+| Claim | Lowering "one Compose project" to "one WSLC session" with `BRIDGED` networking gives that project's services mutual reachability, with no WSLC concept of a separately named/created network object. |
+| Stimulus | A second container (`c2`) created in the *same* session as `c1`, also `BRIDGED`, running a `nc` listener on an internal port (9000, no host mapping); `c1` execs `nc -w 3 <c2's IP> 9000`. |
+| Oracle | `c2`'s own IP is read from `WslcInspectContainer`'s `NetworkSettings.Networks.bridge.IPAddress` field (`172.17.0.3` both runs); `c1`'s exec stdout contains `navisoma-peer-ok`. |
+| Negative condition | `c1`'s exec times out, returns nothing, or connects to the wrong address — this is exactly what happened before the field-name fix described below the table. |
+| Consumer proof | `c1`, a separate container in the same project, is the actual consumer of `c2`'s service — not just an inspection of `c2` in isolation. |
+| Cleanup owner | SDK: `c2` is stopped/deleted/released the same way `c1` is (not separately re-verified with its own postcondition check, since the mechanism is identical to `c1`'s, which is checked). |
+| Boundary | Proves intra-project connectivity + (separately, `port.publish.tcp` below) host reachability. Does **not** prove isolation *from* a different project/session — see "Discovered boundaries" below. |
+| **Result** | **supported** (for the intra-project connectivity #14 case 1 actually needs) |
+
+`WslcInspectContainer`'s JSON schema is undocumented in `wslcsdk.h`. A
+first attempt scanned the payload for "the first dotted-quad-looking
+substring" and got `172.17.0.1` — the bridge's *gateway*, not `c2`'s own
+address (`172.17.0.3`) — because `"Gateway"` sorts before `"IPAddress"` in
+the emitted JSON. This was caught by printing the real payload rather than
+trusting the heuristic, and the probe now looks up the named `IPAddress`
+field specifically.
+
+### 3. `volume.named.persistent` (#14 case 1)
+
+| Field | Content |
+|---|---|
+| Claim | A named volume created independently of any container can be mounted into a container, retains content written to it, and can be deleted independently once no container needs it. |
+| Stimulus | `WslcCreateSessionVhdVolume` before any container exists; `WslcSetContainerSettingsNamedVolumes` attaches it to `c1` at `/mnt/probe-vol`; `c1`'s init process writes a marker file into it; a separate exec (`cat`) reads it back; `WslcDeleteSessionVhdVolume` after `c1` is already deleted. |
+| Oracle | The exec's stdout contains `navisoma-volume-marker`; the delete call returns `S_OK`; a second delete of the same name then fails. |
+| Negative condition | The marker missing from the exec's stdout (mount didn't work, or didn't persist between the writer and the reader process), or the second delete also succeeding (would mean the first delete had no real effect, or the name was silently recreated). |
+| Consumer proof | The `cat` exec — a process distinct from the one that wrote the file — is the consumer of the mounted content. |
+| Cleanup owner | SDK, via `WslcDeleteSessionVhdVolume`; postcondition checked (`volume_delete_postcondition`, `0x80040604` `WSLC_E_VOLUME_NOT_FOUND` on the repeat delete). |
+| Boundary | One volume, one project/session. Sharing one named volume *across* two different sessions was not tested. |
+| **Result** | **supported** |
+
+### 4. `port.publish.tcp` (#14 case 1)
+
+| Field | Content |
+|---|---|
+| Claim | A container port can be published to a fixed Windows host port and reached from outside the container's network namespace. |
+| Stimulus | `WslcSetContainerSettingsPortMappings` maps host `18080` → container `80`; `c1`'s init process loops `echo navisoma-port-ok \| nc -l -p 80`; a real WinSock client (`socket`/`connect`/`recv`, not WSLC API) on the Windows host connects to `127.0.0.1:18080`. |
+| Oracle | `recv` returns 17 bytes containing `navisoma-port-ok`. |
+| Negative condition | `connect` failing, or `recv` returning 0 bytes/different content. |
+| Consumer proof | The Windows-host TCP client *is* the consumer — this is the same relationship Compose's `ports:` exists to serve. |
+| Cleanup owner | The socket is closed by the probe itself (plain WinSock, not a WSLC resource); the container's port mapping ends when the container is deleted (covered by `container_delete_postcondition`). |
+| Boundary | One port, TCP only (UDP mapping exists in the API — `WslcPortProtocol` — but was not exercised). |
+| **Result** | **supported** |
+
+### 5. `build.imagestore.import` (#14 case 3)
+
+| Field | Content |
+|---|---|
+| Claim | An image produced outside WSLC (by tagging an existing pulled reference, and separately by importing raw external bytes) can be consumed by a WSLC container create/start, not merely accepted by an SDK call and discarded. |
+| Stimulus | Path A: `WslcTagSessionImage` retags the pulled `alpine` image as `navisoma-probe-worker:ci`; `c1` is created and started **from that tag**. Path B: `WslcImportSessionImageFromFile` imports a fixture tar (a real, independently-sourced static `busybox` binary, not produced by any container runtime) as `navisoma-probe-import:test`; a one-shot container is then created, started, and exec'd **from that imported reference**. |
+| Oracle | Path A: `c1`'s own checks (port/volume/exec, all above) all pass, proving the tag is genuinely runnable, not just accepted. Path B: `image_import_run_verify`'s container reaches exit code `0` with both a stdout and a distinct stderr marker present. |
+| Negative condition | Path A: `container_create`/`container_start` failing against the tag. Path B: the one-shot container failing to create/start, or its markers/exit code being wrong — which is exactly the earlier gap (the first version of this probe imported and immediately deleted the image, proving only that the SDK accepts external bytes, not that WSLC can run a container from them). |
+| Consumer proof | The one-shot container's exec output for path B; the entire rest of `c1`'s test surface for path A. |
+| Cleanup owner | SDK: `WslcDeleteContainer`/`WslcReleaseContainer` for the one-shot container (path B), `WslcDeleteSessionImage` for both the tag and the import (`image_tag_delete`, and the delete inside path B's own block). |
+| Boundary | The SDK has no C API to *build* from a Dockerfile at all — only to consume an already-built image (CLI/MSBuild/CMake own building, per the SDK's own docs) — matching NAVISOMA's design of delegating build elsewhere and handing WSLC the result. The import fixture is a single-layer flat rootfs (`WslcImportSessionImageFromFile`'s "docker import"-shaped semantics); a full multi-layer OCI/docker-save archive via `WslcLoadSessionImageFromFile` was not tested. |
+| **Result** | **supported** |
+
+## Baseline SDK lifecycle (supporting evidence)
+
+Direct API mechanics that the five capabilities above depend on, evidenced
+by their own `CHECK` lines and the postconditions described under
+"Cleanup verification". Listed for completeness rather than given a full
+per-field contract, since they are lower-scrutiny SDK plumbing rather than
+product-relevant capability claims in their own right.
+
+| Operation | WSLC C API entry points used | Consumer proof | Cleanup owner (postcondition) | Result |
+|---|---|---|---|---|
+| Missing components / service version | `WslcGetMissingComponents`, `WslcGetVersion` | Would gate WSLC backend eligibility before scheduling any deployment; not consumed further in this probe | n/a — query only, no resource created | supported |
+| Session create/terminate/release | `WslcInitSessionSettings`, `WslcCreateSession`, `WslcTerminateSession`, `WslcReleaseSession` | Every other operation in the run uses the returned `WslcSession` handle | SDK owns the runtime session (`session_terminate`/`session_release`); caller owns the `storagePath` directory — see "Production implication" | supported |
+| Pull a small known image | `WslcPullSessionImage`, `WslcListSessionImages` | `image_tag_handoff` and `c1`'s container create both reference the pulled image | SDK, via `WslcDeleteSessionImage`; postcondition checked (`image_pull_delete_postcondition`, re-list shows the name absent) | supported |
+| Container create/start/stop/delete/release | `WslcInitContainerSettings`, `WslcCreateContainer`, `WslcStartContainer`, `WslcStopContainer`, `WslcDeleteContainer`, `WslcReleaseContainer` | Every check under "Capability proof contracts" runs against this container | SDK, via `WslcDeleteContainer`; postcondition checked (`container_delete_postcondition`, re-open fails with `WSLC_E_CONTAINER_NOT_FOUND`) | supported |
+
+## Discovered boundaries (not required by #14, reported for completeness)
+
+Two limitations surfaced during this spike that #14's three fixed,
+single-project scenarios do not actually require evidence for. Per the
+policy, they are named explicitly with their own result rather than folded
+into a "supported" row's prose:
+
+| Boundary | Result | Why |
 |---|---|---|
-| Missing components / service version | `WslcGetMissingComponents`, `WslcGetVersion` | supported |
-| Session create/terminate/release | `WslcInitSessionSettings`, `WslcCreateSession`, `WslcTerminateSession`, `WslcReleaseSession` | supported |
-| Pull/select a small known image | `WslcPullSessionImage`, `WslcListSessionImages`, `WslcDeleteSessionImage` | supported |
-| Container create/start/stop/delete/release | `WslcInitContainerSettings`, `WslcCreateContainer`, `WslcStartContainer`, `WslcStopContainer`, `WslcDeleteContainer`, `WslcReleaseContainer` | supported |
-| Process with stdout+stderr, exit status (`process.exec.recurring`) | `WslcCreateContainerProcess`, `WslcGetProcessIOHandle`, `WslcGetProcessExitEvent`, `WslcGetProcessExitCode` | supported — one exec (`cat <volume file>; echo ... 1>&2`) asserted stdout content, a *distinct* stderr marker, and exit code 0 together, not stdout alone; recurrence itself is a planner-owned scheduling loop over this same primitive, not a separate WSLC capability |
-| `network.named.isolated` (#14 case 1: one named network per project) | `WslcSetContainerSettingsNetworkingMode(BRIDGED)` + one session per project | supported — see note below |
-| `volume.named.persistent` (#14 case 1) | `WslcCreateSessionVhdVolume`, `WslcSetContainerSettingsNamedVolumes`, `WslcDeleteSessionVhdVolume` | supported — volume outlived the container that used it and was independently deletable |
-| `port.publish.tcp` (#14 case 1) | `WslcSetContainerSettingsPortMappings` | supported — verified end-to-end: a real WinSock client on the Windows host connected to the published port and received a payload written by a process inside the Linux container |
-| `build.imagestore.import` (#14 case 3) | `WslcTagSessionImage` (build-output naming → run), `WslcImportSessionImageFromFile` (external image bytes → session image) | supported — see note below |
+| Multiple, independently-named, user-creatable networks *within* one project | **capability-gated: absent in WSLC SDK 2.9.9** | Confirmed, not merely untested: `wslcsdk.h` (682 lines, read in full) exposes no `WslcCreateNetwork`/list/delete function at all — only a per-container `WslcContainerNetworkingMode` enum (`NONE`/`BRIDGED`) and an unused `WSLC_E_NETWORK_NOT_FOUND` code. There is also no live capability-query API for this, so a NAVISOMA WSLC backend would need a static per-pinned-SDK-version capability declaration, not a runtime probe, to refuse this explicitly rather than silently collapsing multiple requested networks into one. |
+| Isolation *between* two different sessions/projects | **unverified** | Not a confirmed absence — genuinely not tested. Every container this spike created lived in one session; nothing was created in a second session to check whether it could observe or reach the first session's containers. It's an architecturally-plausible consequence of each session getting its own VM-like boundary (each has its own storage VHDX and can have its own CPU/memory settings), but that plausibility is not the same as the direct evidence this spike produced for the five required capabilities above, and is not asserted as such. |
 
-**Note on `process.exec.recurring` / stderr:** the first version of this
-probe's exec check only ran `/bin/cat <file>`, which produces no stderr at
-all, and the check passed on stdout and exit code alone — silently proving
-nothing about the stderr channel one way or the other. This was caught in
-review before being treated as evidence. The exec now runs
-`/bin/sh -c "cat <file>; echo navisoma-exec-stderr-marker 1>&2"` and the
-check requires the distinct stderr marker to be present in addition to the
-stdout content and exit code 0.
-
-**Note on `build.imagestore.import`:** the first version of this probe
-imported the fixture image via `WslcImportSessionImageFromFile` and then
-deleted it immediately, which only proved the SDK *accepted* externally-
-supplied bytes, not that WSLC could actually run a container from them —
-also caught in review. The probe now creates a container from the
-imported image, runs its init process to completion, and asserts its
-stdout marker, a distinct stderr marker, and exit code 0 (`image_import_run_verify`
-above) before deleting it. Separately, `WslcTagSessionImage` retags the
-already-pulled `alpine` image and that tag is what the main container (`c1`)
-actually runs from, so the tag-based handoff path is exercised by the rest
-of the probe's own checks rather than being immediately discarded too.
-The SDK has no C API to *build* from a Dockerfile at all (that's
-CLI/MSBuild/CMake-driven per the SDK's own docs) — only to consume an
-already-built image — which matches NAVISOMA's own design of delegating
-build elsewhere and handing WSLC the result.
-
-**Note on `network.named.isolated`:** `wslcsdk.h` (682 lines, read in full)
-exposes no `WslcCreateNetwork`/list/delete function at all — the only
-network-shaped API is a per-container `WslcContainerNetworkingMode` enum
-(`NONE` vs `BRIDGED`) plus a `WSLC_E_NETWORK_NOT_FOUND` error code with no
-corresponding create/lookup call. There is no WSLC primitive for multiple,
-independently-named, user-creatable networks *within* one project. #14's
-case 1 only requires **one** named network per project, and it needs that
-network to do two things: let the project's own services reach each
-other, and let the published port reach the host. Both were verified
-directly, not assumed: the published-port path is described above, and a
-**second container (`c2`) was created in the same session**, its own IP
-address read back from `WslcInspectContainer` (`172.17.0.3` in both runs —
-found by first printing the raw inspect payload rather than guessing the
-JSON field name, since the payload also contains the bridge's `Gateway`
-address as a similar-looking string), and `c1` successfully exec'd a
-client that connected to `c2` over that IP with no host port involved.
-That is the concrete evidence for lowering "one Compose project" to "one
-WSLC session" with `BRIDGED` mode as the network for that project.
-
-What this spike did **not** test is isolation *between* two different
-sessions/projects — #14's three fixed scenarios are all single-project, so
-that claim was out of scope here and is not asserted; it's an
-architecturally-plausible consequence of each session getting its own
-VM-like boundary, not a verified one. Multi-network segmentation *within*
-a single project is likewise absent from SDK 2.9.9 and out of scope for
-what #14 required. Either would need its own capability-gated entry
-(e.g. diagnostic `E-NET-NAMED-UNSUPPORTED`/`E-NET-ISOLATION-UNVERIFIED`) if
-a future scenario needs it, rather than being assumed away.
-
-No row in this table came back scope-breaking, and none needed a
-backend-specific workaround: every WSLC divergence from containerd is
-either fully supported or, in the two out-of-scope cases just discussed,
-cleanly expressible as a capability gate with a normalized diagnostic and
+Neither boundary is scope-breaking: both are cleanly expressible as a
+capability gate (or, for the second, as a specific follow-up probe) with
 no change to the user's Compose file or NAVISOMA's action order.
 
 ## Backend-neutral action order observed
@@ -282,9 +351,10 @@ detour:
 ```
 resolve/pull image → tag (build-output naming) → create prerequisites (named volume)
 → create container (network mode, port mapping, named volume, init process attached)
-→ start → wait (init process listening; exec for stdout/stderr/exit status;
-  a second same-session container + exec for peer-to-peer connectivity)
-→ stop → remove container → remove volume → remove session
+→ start → wait (init process listening; exec ×2 for stdout/stderr/exit status and
+  recurrence; a second same-session container + exec for peer-to-peer connectivity)
+→ stop → remove container (+ postcondition lookup) → remove volume (+ postcondition
+  delete) → remove session
 ```
 
 The import-handoff path (`image_import_handoff` / `image_import_run_verify`)
@@ -293,23 +363,24 @@ one-shot container, independently of the long-running main container above.
 
 ## Recommendation for #13
 
-**proceed** — every capability #14 flagged as required for the fixed
-Compose scenarios is confirmed supported against the real WSLC C API on a
-live host, across two independent runs with full, verified cleanup and
-re-runnability. This includes closing the two gaps a static review of an
-earlier version of this evidence correctly flagged as insufficient: the
-exec check now asserts a distinct stderr marker rather than stdout alone,
-and the import-handoff path now creates/starts/execs a container from the
-imported image and verifies its output before deleting it, rather than
-importing and immediately discarding it. The `network.named.isolated` claim
-is now backed by an actual second container in the same session reaching
-the first one over its own IP, not just the published-port test alone.
-The remaining gaps — multi-network segmentation within one project, and
-isolation *between* two sessions/projects — both fall outside what #14's
-three fixed scenarios require (all three are single-project) and are
-already representable as capability gates rather than scope-breaking cases
-if a future scenario needs them. Combined with #14's finding that no
-canonical resource or action needed a backend-specific type or a divergent
-user workflow, both child gates for #13 now support proceeding to the
-detailed model/graph work in #3, carrying forward these two open items as
-tracked capability gates rather than blockers.
+This issue's own result is **proceed to the next validation**: every
+capability #14 flagged as required is now backed by a full proof contract
+(claim, stimulus, oracle, negative condition, consumer proof, cleanup
+owner/postcondition, boundary) with evidence from two independent,
+identical, fully-postcondition-verified runs — not name-reuse alone. This
+supersedes the earlier version of this evidence, which a static review
+correctly found insufficient on three points (stdout-only exec assertions,
+import-without-consumption, and an unverified network-isolation claim
+resting on the published-port test alone); those gaps are closed above,
+along with strengthening every cleanup claim from "the delete call
+returned `S_OK`" to an actual observed postcondition.
+
+**Proposal for #13: proceed** — conditional on the two discovered,
+out-of-scope boundaries above being carried forward as tracked follow-ups
+rather than silently dropped: multi-network segmentation within one
+project (`capability-gated`, confirmed absent) and inter-session isolation
+(`unverified`, genuinely untested). Neither blocks #14's three fixed
+scenarios, all of which are single-project. Combined with #14's finding
+that no canonical resource or action needed a backend-specific type or a
+divergent user workflow, both child gates now support #13 moving to the
+detailed model/graph work in #3.
