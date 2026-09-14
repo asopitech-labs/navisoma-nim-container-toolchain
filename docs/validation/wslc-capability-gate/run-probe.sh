@@ -12,7 +12,7 @@
 #     verifying those after the probe exits.
 #
 # Usage:
-#   run-probe.sh <probe.exe> <wslcsdk.dll> <import-fixture.tar> <build-output.tar> [times]
+#   run-probe.sh <probe.exe> <wslcsdk.dll> <import-fixture.tar> <archive-loader-evidence.tar> [times]
 #
 # Runs the full stage -> run -> verify-parent-dir-gone cycle `times` times
 # (default 2) from what should be a clean state each time, run in
@@ -21,14 +21,14 @@
 set -euo pipefail
 
 if [ "$#" -lt 4 ]; then
-    echo "usage: $0 <probe.exe> <wslcsdk.dll> <import-fixture.tar> <build-output.tar> [times]" >&2
+    echo "usage: $0 <probe.exe> <wslcsdk.dll> <import-fixture.tar> <archive-loader-evidence.tar> [times]" >&2
     exit 1
 fi
 
 PROBE_EXE="$1"
 WSLCSDK_DLL="$2"
 IMPORT_FIXTURE="$3"
-BUILD_OUTPUT="$4"
+ARCHIVE_LOADER_EVIDENCE="$4"
 TIMES="${5:-2}"
 
 WIN_USER="${NAVISOMA_WSLC_WIN_USER:-asopitech}"
@@ -45,7 +45,7 @@ run_once() {
     cp "$PROBE_EXE" "$STAGING_DIR/probe.exe"
     cp "$WSLCSDK_DLL" "$STAGING_DIR/wslcsdk.dll"
     cp "$IMPORT_FIXTURE" "$STAGING_DIR/import-fixture.tar"
-    cp "$BUILD_OUTPUT" "$STAGING_DIR/build-output.tar"
+    cp "$ARCHIVE_LOADER_EVIDENCE" "$STAGING_DIR/archive-loader-evidence.tar"
 
     echo "=== run $n: probe ==="
     local rc=0
@@ -53,7 +53,7 @@ run_once() {
     echo "probe exit code: $rc"
 
     echo "=== run $n: driver-owned cleanup of staged input files ==="
-    rm -f "$STAGING_DIR/probe.exe" "$STAGING_DIR/wslcsdk.dll" "$STAGING_DIR/import-fixture.tar" "$STAGING_DIR/build-output.tar"
+    rm -f "$STAGING_DIR/probe.exe" "$STAGING_DIR/wslcsdk.dll" "$STAGING_DIR/import-fixture.tar" "$STAGING_DIR/archive-loader-evidence.tar"
     rmdir "$STAGING_DIR" 2>/dev/null || rm -rf "$STAGING_DIR"
 
     echo "=== run $n: verify parent staging directory gone ==="

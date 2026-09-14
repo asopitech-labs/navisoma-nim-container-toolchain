@@ -73,26 +73,41 @@ self-naming image, not a bare rootfs tar. It is also reused, unmodified,
 by the cross-session isolation check (a session needs *some* runnable
 image, and this is the smallest one already on hand).
 
-### `build-output.tar` — the actual build-handoff evidence
+### `archive-loader-evidence.tar` — the archive-loading evidence
 
-A real, independently produced multi-file docker-save/OCI archive, built
-by [`build_test_image.py`](build_test_image.py) — a standalone script that
-talks only to the public `registry-1.docker.io` API over plain HTTPS
-(stdlib `urllib`) to fetch `library/busybox` and re-package it under a
-new repo:tag:
+A real, independently produced, digest-verified multi-file docker-save/OCI
+archive, built by [`build_test_image.py`](build_test_image.py) — a
+standalone script that talks only to the public `registry-1.docker.io` API
+over plain HTTPS (stdlib `urllib`) to fetch `library/busybox` and
+re-package it under a new repo:tag. This is **not Dockerfile/BuildKit
+build evidence** — no Dockerfile is compiled; an already-published image's
+bytes are fetched, verified, and re-tagged. It is real evidence for the
+*consumption* half of a Compose `build:` handoff: WSLC's C API only ever
+sees bytes in this shape, regardless of what produced them.
 
 ```bash
-python3 build_test_image.py build-output.tar navisoma-build-output:ci
+python3 build_test_image.py archive-loader-evidence.tar navisoma-loaded-archive:ci
 ```
 
-This resolved `library/busybox:latest` to config digest
-`sha256:c6348fa86ba0fb2108c9334f5fe913ddc6d853313e655891f133a0127c30099f`
-at build time (re-run the script to track a newer `latest`, or edit
-`SOURCE_TAG` to pin a specific tag). Resulting tar SHA-256:
-`4150b81df6056e0d61cc2ec9c12ded98f662f67b5fcd2e7bd589ab006147278e`. Its
-`manifest.json` carries `"RepoTags": ["navisoma-build-output:ci"]` — the
-exact reference the probe expects to see appear in `WslcListSessionImages`
-after `WslcLoadSessionImageFromFile`, and the exact reference it then
+The script pins an immutable manifest digest by default (not a mutable
+`latest` tag), verifies every fetched blob — manifest, config, and every
+layer — against its own declared content digest before using it, and
+prints the final artifact's own digest:
+
+```
+source: library/busybox@sha256:1cfa4e2b09e127b9c4ed43578d3f3c18e7d44ea47b9ea98475c0cbe9086525f8
+  resolved manifest digest: sha256:1cfa4e2b09e127b9c4ed43578d3f3c18e7d44ea47b9ea98475c0cbe9086525f8
+  config digest (verified): sha256:c6348fa86ba0fb2108c9334f5fe913ddc6d853313e655891f133a0127c30099f
+  layer digest (verified): sha256:b05093807bb0294152bb9cf86d64da722732dddaf7f8882fa1f120477dbc4db3
+new_ref baked into archive manifest.json: navisoma-loaded-archive:ci
+wrote archive-loader-evidence.tar (4689920 bytes)
+output artifact sha256: fbd4ff7708f0a2650f05fabf374c03c220bfe6b7b94a1454d230d21ee9ada6af
+```
+
+Its `manifest.json` carries `"RepoTags": ["navisoma-loaded-archive:ci"]` —
+the exact reference the probe expects to see appear in
+`WslcListSessionImages` after `WslcLoadSessionImageFromFile` (which takes
+no separate name parameter), and the exact reference it then
 creates/starts/execs a container from.
 
 ## Run
@@ -104,15 +119,32 @@ cleanup of the staged files afterward (the probe itself owns every WSLC
 resource and both caller-owned session storage directories):
 
 ```bash
-./run-probe.sh <probe.exe> <wslcsdk.dll> <import-fixture.tar> <build-output.tar> 2
+./run-probe.sh <probe.exe> <wslcsdk.dll> <import-fixture.tar> <archive-loader-evidence.tar> 2
 ```
 
-The probe uses fixed, deterministic resource names (sessions
-`navisoma-wslc-probe`/`navisoma-wslc-probe-iso`, containers
-`navisoma-wslc-probe-c1`/`-c2`/`-iso-c`/`-rawimport`/`-buildout`, volume
-`navisoma-wslc-probe-vol`, image tags under `navisoma-probe-*`/`navisoma-build-output`)
-so that running it again only succeeds if the previous run's cleanup —
-including the driver's own staging-directory cleanup — was complete; the
-driver itself refuses to stage over a directory that still exists. See
+The probe uses fixed, deterministic resource names across two sessions
+(`navisoma-wslc-probe` / `navisoma-wslc-probe-iso`; containers include
+`-c1`, `-c2`, `-iso-c`, `-iso-peer`, `-iso-addrbump`, `-iso-posctrl`,
+`-rawimport`, `-archive`; volume `navisoma-wslc-probe-vol`; image tags
+under `navisoma-probe-*`/`navisoma-loaded-archive`) so that running it
+again only succeeds if the previous run's cleanup — including the driver's
+own staging-directory cleanup — was complete; the driver itself refuses to
+stage over a directory that still exists. See
 [`../wslc-capability-gate.md`](../wslc-capability-gate.md) for recorded
 runs and the resulting capability table.
+
+## Known WSLC behavior found while building this probe
+
+Each session's bridge allocates container addresses independently,
+starting from the same base (e.g. `172.17.0.2`) regardless of what
+addresses are already in use in a different, concurrently running session.
+A freshly created session's first container can therefore collide,
+address-string-for-address-string, with an unrelated container in another
+session — this was caught by the probe's own
+`cross_session_ip_addresses_distinct` check, which failed on the first
+attempt at the cross-session isolation test before a same-session
+"address bump" container (kept running, not just created-and-deleted --
+deleting one immediately frees its address back to the pool for instant
+reuse) was added to force the real peer container onto a different
+address. This is a real behavior worth knowing about for the eventual
+IP-allocation design of a WSLC backend, not just a probe artifact.
