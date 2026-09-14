@@ -6,6 +6,36 @@ A validation result proves only the behavior that the probe observed in its
 declared environment. A successful neighboring operation, an API declaration,
 or manual cleanup after the probe is not evidence for an unobserved claim.
 
+## Mandatory execution order
+
+Validation is not an iterative "implement the last review comment" exercise.
+The task author must use these gates in order:
+
+1. **Decompose the decision.** Split a compound label into atomic claims. For
+   example, network membership, same-project connectivity, and
+   cross-project isolation are three claims, not one `network` result.
+2. **Review the proof design before implementation.** Submit one short plan
+   containing the intended route/topology, a truth table for pass/fail/
+   inconclusive, every required CHECK name, and the exact stop condition. No
+   probe, helper, driver, documentation conclusion, Issue comment, or
+   `proceed` recommendation may be created or changed at this gate.
+3. **Run the smallest discriminating experiment.** Add only the code needed
+   to distinguish the alternatives in the proof design. Do not invent a
+   workaround merely to make a negative result appear; first demonstrate
+   that the workaround preserves target identity and the stated semantics.
+4. **Stop rather than patch around an invalid experiment.** If the target
+   identity, route, or positive control cannot be observed, report that
+   atomic claim `unverified`. Do not grow the probe with address bumps,
+   retries, substitute fixtures, or inferred architecture until a reviewer
+   has accepted a new proof design.
+5. **Independent result review precedes conclusion updates.** The reviewer,
+   not the worker, traces predicates to the approved plan. Only then may the
+   evidence document, Issue result, or parent-gate recommendation change.
+
+The worker's handoff contains observations, failed/inconclusive checks, and
+the exact commit only. It must not declare the product decision or alter a
+parent issue's status.
+
 ## Required proof contract
 
 Every validation issue must name, for each claimed capability:
@@ -140,5 +170,9 @@ able to answer all of these without designing the test contract themselves:
 4. Which resources are created, who removes each one, and how is absence
    observed?
 5. What conclusion is forbidden until this evidence exists?
+6. What condition ends the experiment as `unverified` instead of inviting a
+   larger workaround?
+7. Who reviews the proof design before code is written, and who independently
+   reviews the result before the Issue conclusion changes?
 
 This policy governs validation work in `docs/validation/` and related issues.
