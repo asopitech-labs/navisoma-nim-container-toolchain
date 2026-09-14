@@ -21,6 +21,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <objbase.h>
+#include <shellapi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,6 +49,7 @@
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "shell32.lib")
 
 /* ---- fixed, deterministic probe identifiers (see docs/validation/wslc-capability-gate.md) ---- */
 static const wchar_t *kSessionName = L"navisoma-wslc-probe";
@@ -56,13 +58,34 @@ static const char *kPullImage = "docker.io/library/alpine:3.19";
 static const char *kTaggedRepo = "navisoma-probe-worker";
 static const char *kTaggedTag = "ci";
 static const char *kTaggedRef = "navisoma-probe-worker:ci";
-static const char *kImportRef = "navisoma-probe-import:test";
+/* Raw single-file rootfs import: supplementary plumbing evidence only.
+ * NOT used as evidence for the Compose build-handoff claim -- see
+ * kBuildOutputRef below for that. */
+static const char *kRawImportRef = "navisoma-probe-rawimport:test";
+static const char *kRawImportContainerName = "navisoma-wslc-probe-rawimport";
+static const wchar_t *kRawImportTarPath =
+    L"C:\\Users\\asopitech\\AppData\\Local\\Temp\\navisoma-wslc-probe\\import-fixture.tar";
+/* Real multi-file docker-save/OCI archive, produced by an independent
+ * script (build_test_image.py) from a public registry -- not WSLC, not
+ * BuildKit, not a Dockerfile build. Its manifest.json carries this exact
+ * repo:tag; the probe never passes this name to the load call itself. */
+static const char *kBuildOutputRef = "navisoma-build-output:ci";
+static const char *kBuildOutputContainerName = "navisoma-wslc-probe-buildout";
+static const wchar_t *kBuildOutputTarPath =
+    L"C:\\Users\\asopitech\\AppData\\Local\\Temp\\navisoma-wslc-probe\\build-output.tar";
 static const char *kVolumeName = "navisoma-wslc-probe-vol";
 static const char *kContainerName = "navisoma-wslc-probe-c1";
 static const char *kPeerContainerName = "navisoma-wslc-probe-c2";
-static const char *kImportContainerName = "navisoma-wslc-probe-import";
 static const unsigned short kHostPort = 18080;
 static const unsigned short kPeerPort = 9000;
+
+/* Second, independent session + container used only to test whether a
+ * different session/project can reach c1 -- kept separate from every name
+ * above so the two sessions' lifecycles never overlap in name. */
+static const wchar_t *kIsoSessionName = L"navisoma-wslc-probe-iso";
+static const wchar_t *kIsoStoragePath =
+    L"C:\\Users\\asopitech\\AppData\\Local\\Temp\\navisoma-wslc-probe\\iso-storage";
+static const char *kIsoContainerName = "navisoma-wslc-probe-iso-c";
 
 static int gFailures = 0;
 
@@ -156,19 +179,23 @@ static int extractJsonStringField(const char *json, const char *key, char *out, 
 typedef struct OneShotResult {
     int created, started, waitedOk, exitOk;
     int exitCode;
+    int deleteVerifiedGone;
     char stdoutBuf[512];
     char stderrBuf[512];
 } OneShotResult;
 
 /*
- * Creates a container from `image` with networking disabled, runs `argv` as
+ * Creates a container from `image` with `networkingMode`, runs `argv` as
  * its init process to completion, captures stdout/stderr/exit code, then
- * stops/deletes/releases the container. Used to prove an image handed to
- * WSLC by a path other than pull (tag, import) is actually runnable, not
- * just accepted by the API and immediately discarded.
+ * stops/deletes/releases the container and verifies -- by reopening it by
+ * name, not by trusting the delete call's own return code -- that it is
+ * actually gone. Used both to prove an image handed to WSLC by a path
+ * other than pull (tag, import, load) is actually runnable, and as the
+ * vehicle for the cross-session isolation probe below.
  */
 static void runOneShotAndCleanup(WslcSession session, const char *containerName, const char *image,
-                                  const char *const *argvList, size_t argc, OneShotResult *out) {
+                                  WslcContainerNetworkingMode networkingMode, const char *const *argvList,
+                                  size_t argc, OneShotResult *out) {
     ZeroMemory(out, sizeof(*out));
 
     WslcContainerSettings cs __attribute__((aligned(8)));
@@ -178,7 +205,7 @@ static void runOneShotAndCleanup(WslcSession session, const char *containerName,
         return;
     }
     (void)WslcSetContainerSettingsName(&cs, containerName);
-    (void)WslcSetContainerSettingsNetworkingMode(&cs, WSLC_CONTAINER_NETWORKING_MODE_NONE);
+    (void)WslcSetContainerSettingsNetworkingMode(&cs, networkingMode);
 
     WslcProcessSettings proc __attribute__((aligned(8)));
     ZeroMemory(&proc, sizeof(proc));
@@ -256,6 +283,13 @@ static void runOneShotAndCleanup(WslcSession session, const char *containerName,
     freeSdkString(err);
     err = NULL;
     (void)WslcReleaseContainer(container);
+
+    WslcContainer reopened = NULL;
+    HRESULT reopenHr = WslcOpenContainer(session, containerName, &reopened, NULL);
+    out->deleteVerifiedGone = FAILED(reopenHr);
+    if (SUCCEEDED(reopenHr)) {
+        (void)WslcReleaseContainer(reopened);
+    }
 }
 
 typedef struct ExecResult {
@@ -327,6 +361,38 @@ static void execInRunningContainer(WslcContainer container, const char *const *a
         free(errCtx.buf);
     }
     (void)WslcReleaseProcess(execProcess);
+}
+
+/*
+ * `storagePath` in WslcInitSessionSettings is caller-supplied, so it is
+ * caller-owned storage by construction -- the SDK does not delete it on
+ * WslcTerminateSession/WslcReleaseSession (observed directly: the
+ * directory was still present after both runs of an earlier version of
+ * this probe). This recursively deletes it and then asserts non-existence
+ * via GetFileAttributesW, rather than trusting the delete call.
+ */
+static int deleteStoragePathAndVerifyGone(const wchar_t *path, char *detailOut, size_t detailOutSize) {
+    wchar_t buf[512];
+    size_t len = wcslen(path);
+    if (len + 2 >= sizeof(buf) / sizeof(buf[0])) {
+        snprintf(detailOut, detailOutSize, "path too long");
+        return 0;
+    }
+    memcpy(buf, path, (len + 1) * sizeof(wchar_t));
+    buf[len + 1] = L'\0'; /* SHFileOperationW's pFrom must be double-null-terminated */
+
+    SHFILEOPSTRUCTW op;
+    ZeroMemory(&op, sizeof(op));
+    op.wFunc = FO_DELETE;
+    op.pFrom = buf;
+    op.fFlags = FOF_NO_UI | FOF_NOCONFIRMATION | FOF_NOERRORUI;
+    int opRc = SHFileOperationW(&op);
+
+    DWORD attrs = GetFileAttributesW(path);
+    int gone = (attrs == INVALID_FILE_ATTRIBUTES);
+    snprintf(detailOut, detailOutSize, "shFileOpRc=%d attrsAfter=0x%08lX (INVALID_FILE_ATTRIBUTES=gone)", opRc,
+             (unsigned long)attrs);
+    return gone;
 }
 
 int main(int argc, char **argv) {
@@ -443,23 +509,24 @@ int main(int argc, char **argv) {
         logSkip("image_tag_handoff", "pull failed");
     }
 
-    /* ---------------- 4b. build handoff, path B: import externally-produced image bytes ---------------- */
     /*
-     * The fixture tar is a minimal real Linux rootfs (a single statically
-     * linked busybox binary at /bin/busybox, fetched over plain HTTPS from
-     * busybox.net independently of any container runtime or CLI under
-     * test) so the imported image can actually be created, started, and
-     * exec'd from below -- not just accepted and immediately deleted.
+     * ---------------- 4b. SUPPLEMENTARY, not build-handoff evidence: raw
+     * single-file rootfs import ----------------
+     * WslcImportSessionImageFromFile's "docker import"-shaped semantics
+     * accept any tar as a flat single-layer rootfs with no embedded name
+     * or manifest. That is a real, distinct WSLC capability worth
+     * recording, but it is not what a Compose `build:` handoff produces
+     * (a multi-layer, manifest-carrying, self-naming OCI/docker-save
+     * archive) -- see 4c below for that evidence instead.
      */
     {
-        const wchar_t *tarPath = L"C:\\Users\\asopitech\\AppData\\Local\\Temp\\navisoma-wslc-probe\\import-fixture.tar";
         WslcImportImageOptions importOpts;
         ZeroMemory(&importOpts, sizeof(importOpts));
         err = NULL;
-        hr = WslcImportSessionImageFromFile(session, kImportRef, tarPath, &importOpts, &err);
+        hr = WslcImportSessionImageFromFile(session, kRawImportRef, kRawImportTarPath, &importOpts, &err);
         int importOk = SUCCEEDED(hr);
         describeHr(hr, err, detail, sizeof(detail));
-        logResult("image_import_handoff", importOk, detail);
+        logResult("supplementary_raw_rootfs_import", importOk, detail);
         freeSdkString(err);
         err = NULL;
 
@@ -468,22 +535,119 @@ int main(int argc, char **argv) {
                 "/bin/busybox", "sh", "-c",
                 "echo navisoma-import-stdout-marker; echo navisoma-import-stderr-marker 1>&2; exit 0"};
             OneShotResult res;
-            runOneShotAndCleanup(session, kImportContainerName, kImportRef, importArgv,
-                                  sizeof(importArgv) / sizeof(importArgv[0]), &res);
+            runOneShotAndCleanup(session, kRawImportContainerName, kRawImportRef, WSLC_CONTAINER_NETWORKING_MODE_NONE,
+                                  importArgv, sizeof(importArgv) / sizeof(importArgv[0]), &res);
             int runOk = res.created && res.started && res.waitedOk && res.exitOk && res.exitCode == 0 &&
                         strstr(res.stdoutBuf, "navisoma-import-stdout-marker") != NULL &&
                         strstr(res.stderrBuf, "navisoma-import-stderr-marker") != NULL;
             snprintf(detail, sizeof(detail),
                      "created=%d started=%d waitedOk=%d exitOk=%d exitCode=%d stdout=[%s] stderr=[%s]", res.created,
                      res.started, res.waitedOk, res.exitOk, res.exitCode, res.stdoutBuf, res.stderrBuf);
-            logResult("image_import_run_verify", runOk, detail);
+            logResult("supplementary_raw_rootfs_run_verify", runOk, detail);
+            logResult("supplementary_raw_rootfs_container_delete_postcondition", res.deleteVerifiedGone, "");
 
             err = NULL;
-            hr = WslcDeleteSessionImage(session, kImportRef, &err);
+            hr = WslcDeleteSessionImage(session, kRawImportRef, &err);
+            describeHr(hr, err, detail, sizeof(detail));
+            logResult("supplementary_raw_rootfs_image_delete", SUCCEEDED(hr), detail);
             freeSdkString(err);
             err = NULL;
         } else {
-            logSkip("image_import_run_verify", "import failed");
+            logSkip("supplementary_raw_rootfs_run_verify", "import failed");
+            logSkip("supplementary_raw_rootfs_container_delete_postcondition", "import failed");
+            logSkip("supplementary_raw_rootfs_image_delete", "import failed");
+        }
+    }
+
+    /*
+     * ---------------- 4c. build.imagestore.import, the actual Compose
+     * build-handoff evidence: load a real, independently produced
+     * OCI/docker-save archive ----------------
+     * build-output.tar was produced by build_test_image.py, a standalone
+     * script that talks only to a public registry over plain HTTPS -- not
+     * WSLC, not BuildKit, not this SDK, not a Dockerfile build. Its
+     * manifest.json carries the repo:tag `kBuildOutputRef` itself;
+     * WslcLoadSessionImageFromFile takes no separate name parameter, so
+     * the only way for that name to reach WslcInitContainerSettings below
+     * is for the archive's own embedded identity to have round-tripped
+     * through the load call correctly.
+     */
+    {
+        WslcLoadImageOptions loadOpts;
+        ZeroMemory(&loadOpts, sizeof(loadOpts));
+        err = NULL;
+        hr = WslcLoadSessionImageFromFile(session, kBuildOutputTarPath, &loadOpts, &err);
+        int loadOk = SUCCEEDED(hr);
+        describeHr(hr, err, detail, sizeof(detail));
+        logResult("build_output_load_handoff", loadOk, detail);
+        freeSdkString(err);
+        err = NULL;
+
+        int nameObserved = 0;
+        if (loadOk) {
+            WslcImageInfo *images = NULL;
+            uint32_t count = 0;
+            HRESULT listHr = WslcListSessionImages(session, &images, &count);
+            if (SUCCEEDED(listHr) && images) {
+                for (uint32_t i = 0; i < count; i++) {
+                    if (strstr(images[i].name, "navisoma-build-output") != NULL) {
+                        nameObserved = 1;
+                        break;
+                    }
+                }
+                CoTaskMemFree(images);
+            }
+            snprintf(detail, sizeof(detail), "listHr=0x%08lX count=%u nameObserved=%d", (unsigned long)listHr, count,
+                     nameObserved);
+            logResult("build_output_exact_reference_observed", nameObserved, detail);
+        } else {
+            logSkip("build_output_exact_reference_observed", "load failed");
+        }
+
+        if (loadOk) {
+            static const char *buildArgv[] = {
+                "/bin/sh", "-c", "echo navisoma-build-stdout-marker; echo navisoma-build-stderr-marker 1>&2; exit 0"};
+            OneShotResult res;
+            runOneShotAndCleanup(session, kBuildOutputContainerName, kBuildOutputRef,
+                                  WSLC_CONTAINER_NETWORKING_MODE_NONE, buildArgv,
+                                  sizeof(buildArgv) / sizeof(buildArgv[0]), &res);
+            int runOk = res.created && res.started && res.waitedOk && res.exitOk && res.exitCode == 0 &&
+                        strstr(res.stdoutBuf, "navisoma-build-stdout-marker") != NULL &&
+                        strstr(res.stderrBuf, "navisoma-build-stderr-marker") != NULL;
+            snprintf(detail, sizeof(detail),
+                     "created=%d started=%d waitedOk=%d exitOk=%d exitCode=%d stdout=[%s] stderr=[%s]", res.created,
+                     res.started, res.waitedOk, res.exitOk, res.exitCode, res.stdoutBuf, res.stderrBuf);
+            logResult("build_output_run_verify", runOk, detail);
+            logResult("build_output_container_delete_postcondition", res.deleteVerifiedGone, "");
+
+            err = NULL;
+            hr = WslcDeleteSessionImage(session, kBuildOutputRef, &err);
+            int deleteOk = SUCCEEDED(hr);
+            describeHr(hr, err, detail, sizeof(detail));
+            logResult("build_output_image_delete", deleteOk, detail);
+            freeSdkString(err);
+            err = NULL;
+
+            WslcImageInfo *imagesAfter = NULL;
+            uint32_t countAfter = 0;
+            HRESULT listHr2 = WslcListSessionImages(session, &imagesAfter, &countAfter);
+            int stillPresent = 0;
+            if (SUCCEEDED(listHr2) && imagesAfter) {
+                for (uint32_t i = 0; i < countAfter; i++) {
+                    if (strstr(imagesAfter[i].name, "navisoma-build-output") != NULL) {
+                        stillPresent = 1;
+                        break;
+                    }
+                }
+                CoTaskMemFree(imagesAfter);
+            }
+            snprintf(detail, sizeof(detail), "listHr=0x%08lX stillPresent=%d", (unsigned long)listHr2, stillPresent);
+            logResult("build_output_image_delete_postcondition", SUCCEEDED(listHr2) && !stillPresent, detail);
+        } else {
+            logSkip("build_output_run_verify", "load failed");
+            logSkip("build_output_container_delete_postcondition", "load failed");
+            logSkip("build_output_image_delete", "load failed");
+            logSkip("build_output_image_delete_postcondition", "load failed");
         }
     }
 
@@ -589,6 +753,22 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* c1's own bridge IP, needed by the cross-session isolation probe (6f) below. */
+    char c1Ip[32] = {0};
+    int c1GotIp = 0;
+    if (containerStarted) {
+        Sleep(500);
+        PSTR inspect1 = NULL;
+        hr = WslcInspectContainer(container, &inspect1);
+        if (SUCCEEDED(hr) && inspect1) {
+            c1GotIp = extractJsonStringField(inspect1, "IPAddress", c1Ip, sizeof(c1Ip));
+            CoTaskMemFree(inspect1);
+        }
+        logResult("c1_container_ip_inspect", c1GotIp, c1GotIp ? c1Ip : "no IPAddress field found");
+    } else {
+        logSkip("c1_container_ip_inspect", "container not started");
+    }
+
     /* ---------------- 6b. network: published TCP port end-to-end ---------------- */
     if (containerStarted) {
         Sleep(2000); /* let the listener come up inside the container */
@@ -643,13 +823,19 @@ int main(int argc, char **argv) {
         logResult("process_exec", r1.execOk, "");
 
         if (r1.execOk) {
+            /*
+             * All three -- stdout marker, stderr marker, exit code -- are
+             * required together for this one check, per the policy's rule
+             * that a process-I/O claim must assert both streams and the
+             * exit status jointly, not stdout-only with stderr checked
+             * elsewhere (or not at all).
+             */
             int volumeReadOk = strstr(r1.stdoutBuf, "navisoma-volume-marker") != NULL;
             int stderrOk = strstr(r1.stderrBuf, "navisoma-exec-stderr-marker") != NULL;
             snprintf(detail, sizeof(detail), "waitedOk=%d exitOk=%d exitCode=%d stdout=[%s] stderr=[%s]", r1.waitedOk,
                      r1.exitOk, r1.exitCode, r1.stdoutBuf, r1.stderrBuf);
             logResult("process_stdio_exit_status",
-                      (r1.waitedOk && r1.exitOk && r1.exitCode == 0 && stderrOk), detail);
-            logResult("named_volume_mount", volumeReadOk, volumeReadOk ? "marker read back through exec" : "marker not observed");
+                      (r1.waitedOk && r1.exitOk && r1.exitCode == 0 && volumeReadOk && stderrOk), detail);
 
             static const char *secondArgv[] = {
                 "/bin/sh", "-c", "echo navisoma-exec2-stdout-marker; echo navisoma-exec2-stderr-marker 1>&2"};
@@ -663,13 +849,11 @@ int main(int argc, char **argv) {
                       (r2.execOk && r2.waitedOk && r2.exitOk && r2.exitCode == 0 && r2StdoutOk && r2StderrOk), detail);
         } else {
             logSkip("process_stdio_exit_status", "exec failed");
-            logSkip("named_volume_mount", "exec failed");
             logSkip("process_exec_second_invocation", "first exec failed");
         }
     } else {
         logSkip("process_exec", "container not started");
         logSkip("process_stdio_exit_status", "container not started");
-        logSkip("named_volume_mount", "container not started");
         logSkip("process_exec_second_invocation", "container not started");
     }
 
@@ -788,17 +972,132 @@ int main(int argc, char **argv) {
             freeSdkString(err);
             err = NULL;
             (void)WslcReleaseContainer(peer);
+
+            WslcContainer peerReopened = NULL;
+            HRESULT peerReopenHr = WslcOpenContainer(session, kPeerContainerName, &peerReopened, NULL);
+            snprintf(detail, sizeof(detail), "reopen hr=0x%08lX (expected FAILED = truly deleted)",
+                     (unsigned long)peerReopenHr);
+            logResult("peer_container_delete_postcondition", FAILED(peerReopenHr), detail);
+            if (SUCCEEDED(peerReopenHr)) {
+                (void)WslcReleaseContainer(peerReopened);
+            }
         }
     } else {
         logSkip("peer_container_ip_inspect", "container not started");
         logSkip("intra_session_service_connectivity", "container not started");
+        logSkip("peer_container_delete_postcondition", "container not started");
     }
 
-    if (initProcess) {
-        (void)WslcReleaseProcess(initProcess);
+    /*
+     * ---------------- 6f. network: cross-session isolation ----------------
+     * The claim under test in 6d was intra-project connectivity. This is
+     * the separate claim: a container in a DIFFERENT, independently
+     * created session must NOT be able to reach c1. Both sessions exist
+     * concurrently for this check. Until this passes, network.named.isolated
+     * stays `unverified` for the isolation half of the claim regardless of
+     * how 6d turns out -- see docs/validation/wslc-capability-gate.md.
+     */
+    if (containerStarted && c1GotIp) {
+        WslcSessionSettings isoSettings __attribute__((aligned(8)));
+        ZeroMemory(&isoSettings, sizeof(isoSettings));
+        HRESULT isoInitHr = WslcInitSessionSettings(kIsoSessionName, kIsoStoragePath, &isoSettings);
+        WslcSession isoSession = NULL;
+        int isoSessionOk = 0;
+        if (SUCCEEDED(isoInitHr)) {
+            (void)WslcSetSessionSettingsTimeout(&isoSettings, 60000);
+            err = NULL;
+            HRESULT isoSessionHr = WslcCreateSession(&isoSettings, &isoSession, &err);
+            isoSessionOk = SUCCEEDED(isoSessionHr);
+            describeHr(isoSessionHr, err, detail, sizeof(detail));
+            logResult("iso_session_create", isoSessionOk, detail);
+            freeSdkString(err);
+            err = NULL;
+        } else {
+            describeHr(isoInitHr, NULL, detail, sizeof(detail));
+            logResult("iso_session_create", 0, detail);
+        }
+
+        int isoImportOk = 0;
+        if (isoSessionOk) {
+            WslcImportImageOptions isoImportOpts;
+            ZeroMemory(&isoImportOpts, sizeof(isoImportOpts));
+            err = NULL;
+            HRESULT isoImportHr =
+                WslcImportSessionImageFromFile(isoSession, kRawImportRef, kRawImportTarPath, &isoImportOpts, &err);
+            isoImportOk = SUCCEEDED(isoImportHr);
+            describeHr(isoImportHr, err, detail, sizeof(detail));
+            logResult("iso_session_image_import", isoImportOk, detail);
+            freeSdkString(err);
+            err = NULL;
+        } else {
+            logSkip("iso_session_image_import", "iso session create failed");
+        }
+
+        if (isoImportOk) {
+            char isoCmd[160];
+            snprintf(isoCmd, sizeof(isoCmd), "/bin/busybox nc -w 3 %s 80", c1Ip);
+            const char *isoArgv[] = {"/bin/busybox", "sh", "-c", isoCmd};
+            OneShotResult isoRes;
+            runOneShotAndCleanup(isoSession, kIsoContainerName, kRawImportRef, WSLC_CONTAINER_NETWORKING_MODE_BRIDGED,
+                                  isoArgv, sizeof(isoArgv) / sizeof(isoArgv[0]), &isoRes);
+            if (isoRes.created && isoRes.started) {
+                int reachedC1 = strstr(isoRes.stdoutBuf, "navisoma-port-ok") != NULL;
+                snprintf(detail, sizeof(detail), "target=%s:80 waitedOk=%d exitCode=%d stdout=[%s] (expected: empty/no navisoma-port-ok)",
+                         c1Ip, isoRes.waitedOk, isoRes.exitCode, isoRes.stdoutBuf);
+                logResult("cross_session_isolation", !reachedC1, detail);
+            } else {
+                snprintf(detail, sizeof(detail), "iso container created=%d started=%d (inconclusive, not a pass)",
+                         isoRes.created, isoRes.started);
+                logSkip("cross_session_isolation", detail);
+            }
+            logResult("iso_session_container_delete_postcondition", isoRes.deleteVerifiedGone, "");
+
+            err = NULL;
+            HRESULT isoImgDelHr = WslcDeleteSessionImage(isoSession, kRawImportRef, &err);
+            freeSdkString(err);
+            err = NULL;
+            logResult("iso_session_image_delete", SUCCEEDED(isoImgDelHr), "");
+        } else {
+            logSkip("cross_session_isolation", "iso session/image setup failed");
+            logSkip("iso_session_container_delete_postcondition", "iso session/image setup failed");
+            logSkip("iso_session_image_delete", "iso session/image setup failed");
+        }
+
+        if (isoSessionOk) {
+            HRESULT isoTermHr = WslcTerminateSession(isoSession);
+            logResult("iso_session_terminate", SUCCEEDED(isoTermHr), "");
+            HRESULT isoRelHr = WslcReleaseSession(isoSession);
+            logResult("iso_session_release", SUCCEEDED(isoRelHr), "");
+
+            char storageDetail[256];
+            int isoStorageGone = deleteStoragePathAndVerifyGone(kIsoStoragePath, storageDetail, sizeof(storageDetail));
+            logResult("iso_session_storage_deleted_and_verified_gone", isoStorageGone, storageDetail);
+        } else {
+            logSkip("iso_session_terminate", "iso session create failed");
+            logSkip("iso_session_release", "iso session create failed");
+            logSkip("iso_session_storage_deleted_and_verified_gone", "iso session create failed");
+        }
+    } else {
+        logSkip("iso_session_create", "c1 not started or no IP");
+        logSkip("iso_session_image_import", "c1 not started or no IP");
+        logSkip("cross_session_isolation", "c1 not started or no IP");
+        logSkip("iso_session_container_delete_postcondition", "c1 not started or no IP");
+        logSkip("iso_session_image_delete", "c1 not started or no IP");
+        logSkip("iso_session_terminate", "c1 not started or no IP");
+        logSkip("iso_session_release", "c1 not started or no IP");
+        logSkip("iso_session_storage_deleted_and_verified_gone", "c1 not started or no IP");
     }
 
-    /* ---------------- 7. teardown: container stop/delete/release ---------------- */
+    /*
+     * ---------------- 7 (early half). container termination verified,
+     * before releasing the init process handle ----------------
+     * c1's init process is a genuinely long-running loop (up to 40
+     * iterations of a blocking listen), not a short-lived one-shot
+     * command. Stopping it here and then checking its own reported state
+     * and exit event -- rather than only trusting WslcStopContainer's
+     * return code -- is the cancellation/termination evidence for a
+     * long-running process that a one-shot exec can't provide.
+     */
     if (containerStarted) {
         err = NULL;
         hr = WslcStopContainer(container, WSLC_SIGNAL_SIGTERM, 10, &err);
@@ -806,10 +1105,34 @@ int main(int argc, char **argv) {
         logResult("container_stop", SUCCEEDED(hr), detail);
         freeSdkString(err);
         err = NULL;
+
+        if (initProcess) {
+            HANDLE initExitEvt = NULL;
+            (void)WslcGetProcessExitEvent(initProcess, &initExitEvt);
+            DWORD initWaitRes = initExitEvt ? WaitForSingleObject(initExitEvt, 8000) : WAIT_TIMEOUT;
+            WslcProcessState initState = WSLC_PROCESS_STATE_UNKNOWN;
+            (void)WslcGetProcessState(initProcess, &initState);
+            INT32 initExitCode = -999;
+            HRESULT initExitHr = WslcGetProcessExitCode(initProcess, &initExitCode);
+            snprintf(detail, sizeof(detail), "exitEventWait=%lu state=%d exitCodeHr=0x%08lX exitCode=%d",
+                     (unsigned long)initWaitRes, (int)initState, (unsigned long)initExitHr, (int)initExitCode);
+            logResult("container_termination_signal_verified",
+                      initWaitRes == WAIT_OBJECT_0 &&
+                          (initState == WSLC_PROCESS_STATE_EXITED || initState == WSLC_PROCESS_STATE_SIGNALLED),
+                      detail);
+        } else {
+            logSkip("container_termination_signal_verified", "no init process handle");
+        }
     } else if (containerCreated) {
         logSkip("container_stop", "never started");
+        logSkip("container_termination_signal_verified", "never started");
     }
 
+    if (initProcess) {
+        (void)WslcReleaseProcess(initProcess);
+    }
+
+    /* ---------------- 7. teardown: container delete/release (stop already done above, with termination verification) ---------------- */
     if (containerCreated) {
         err = NULL;
         hr = WslcDeleteContainer(container, WSLC_DELETE_CONTAINER_FLAG_FORCE, &err);
@@ -862,6 +1185,23 @@ int main(int argc, char **argv) {
         logResult("image_tag_delete", SUCCEEDED(hr), detail);
         freeSdkString(err);
         err = NULL;
+
+        WslcImageInfo *tagImagesAfter = NULL;
+        uint32_t tagCountAfter = 0;
+        HRESULT tagListHr = WslcListSessionImages(session, &tagImagesAfter, &tagCountAfter);
+        int tagStillPresent = 0;
+        if (SUCCEEDED(tagListHr) && tagImagesAfter) {
+            for (uint32_t i = 0; i < tagCountAfter; i++) {
+                if (strstr(tagImagesAfter[i].name, kTaggedRepo) != NULL) {
+                    tagStillPresent = 1;
+                    break;
+                }
+            }
+            CoTaskMemFree(tagImagesAfter);
+        }
+        snprintf(detail, sizeof(detail), "listHr=0x%08lX tagStillPresent=%d", (unsigned long)tagListHr,
+                 tagStillPresent);
+        logResult("image_tag_delete_postcondition", SUCCEEDED(tagListHr) && !tagStillPresent, detail);
     }
 
     if (pullOk) {
@@ -901,6 +1241,12 @@ int main(int argc, char **argv) {
 
     hr = WslcReleaseSession(session);
     logResult("session_release", SUCCEEDED(hr), "");
+
+    {
+        char storageDetail[256];
+        int storageGone = deleteStoragePathAndVerifyGone(kStoragePath, storageDetail, sizeof(storageDetail));
+        logResult("session_storage_deleted_and_verified_gone", storageGone, storageDetail);
+    }
 
     printf("PROBE_DONE failures=%d\n", gFailures);
     CoUninitialize();
