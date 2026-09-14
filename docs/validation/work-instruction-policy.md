@@ -56,6 +56,44 @@ isolation, or lifecycle ownership. If no such property is tested, the mapping
 remains `capability-gated`; it is not `supported` merely because an API setting
 has a similar name.
 
+### Negative claims and isolation
+
+An absent marker, empty output, timeout, or failed command is not by itself
+evidence of isolation or denial: it can also be a broken probe, a dead target,
+or a wrong route. A negative claim must assert all of the following in its
+actual pass predicate:
+
+- setup and measurement completion (created/started, wait, and exit-status
+  retrieval where applicable);
+- the expected negative result (for example, the documented non-zero exit
+  status and absence of the target marker);
+- a positive control that establishes the named target is live and returns its
+  marker through the relevant transport; and
+- source/target identity evidence sufficient to rule out self-routing or an
+  ambiguous overlapping address.
+
+For an isolation claim, test both directions unless the documented API
+contract establishes that the boundary is symmetric. One failed directed
+connection proves only that directed attempt, never the broad label
+"isolated".
+
+### Assertion-to-report traceability
+
+Every stated oracle must map to a single boolean predicate in the probe. A
+value printed only in a diagnostic string, or asserted only by a different
+CHECK row, does not satisfy that row's oracle. Independent review must trace
+each `supported` result from its prose oracle to the exact predicate and its
+inputs.
+
+### External artifact provenance
+
+An artifact claimed to come from a registry or builder must be pinned to an
+immutable producer identity (for example, a manifest digest), verify every
+declared input blob digest, and record the final artifact digest used by the
+run. Repackaging a fetched image proves archive compatibility; it must not be
+described as a Dockerfile/BuildKit build unless such a build actually produced
+the artifact.
+
 ### Cleanup
 
 Every created resource must have one explicit owner and deletion action.
@@ -63,6 +101,11 @@ Running twice with the same names proves name reuse only. It does not prove
 that caller-owned files, VHDX directories, caches, or external resources were
 removed. Report SDK cleanup and caller cleanup separately, then assert both
 postconditions when complete cleanup is claimed.
+
+"Complete cleanup" applies to every resource the probe creates, including
+supplementary fixtures imported into a runtime and resources in secondary
+sessions. A primary capability's cleanup check cannot stand in for a distinct
+resource with another identity.
 
 ## Decision and review rules
 
