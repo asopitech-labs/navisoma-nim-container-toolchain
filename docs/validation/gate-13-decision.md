@@ -51,7 +51,12 @@ to begin production bridge/binding implementation.
 ## Disposition
 
 - **#13**: closed, outcome `revise the common semantic contract`.
-- **#14**: left as-is; its evidence remains part of the basis above.
+- **#14**: closed. Its candidate Canonical Model / Execution Graph spike
+  is complete on the basis of this decision — it described a candidate
+  model for all three fixed cases but did not establish it as an
+  irreducible NAVISOMA-specific core, which is exactly the finding this
+  decision rests on; there is no further open work item under #14 as a
+  result of this closure.
 - **#15**: closed without further verification. The WSLC adapter
   capability evidence it already collected (see "WSLC adapter capability
   evidence" in [`wslc-capability-gate.md`](wslc-capability-gate.md)) is

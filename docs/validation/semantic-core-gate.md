@@ -190,14 +190,16 @@ services:
 
 ## Recommendation for #13
 
-**proceed** — with the explicit condition that the five capabilities listed
-above (`network.named`, `volume.named.persistent`,
-`port.publish.tcp`, `process.exec.recurring`, `build.imagestore.import`) are
-the required-capability checklist that #15 must confirm or refute on a real
-WSLC host before #13 can close. A confirmation upholds this recommendation
-unchanged; a refutation on any one of them should be re-litigated as a
-possible scope-breaking case for that capability specifically, not as a
-reason to discard the common model as a whole. Cross-project network
-isolation and single-project multi-network segmentation are out of scope
-for this checklist — see the scope note under Case 1 — and are not part of
-#13's minimal-core feasibility gate.
+A candidate backend-neutral Canonical Model / Execution Graph could be
+described for all three fixed cases, and #15 went on to collect real WSLC
+adapter capability evidence against the five capabilities this spike
+identified (`network.named`, `volume.named.persistent`,
+`port.publish.tcp`, `process.exec.recurring`, `build.imagestore.import`).
+That evidence did not establish that this candidate model is a
+NAVISOMA-specific semantic core irreducible to existing Compose/runtime/
+adapter combinations — see
+[`gate-13-decision.md`](gate-13-decision.md) for the gap that surfaced
+(the `network.named` row assumes a project-scoped network resource with
+its own create/remove lifecycle; WSLC's C API has no such object at all).
+On that basis, **#13 concluded `revise the common semantic contract` and
+is closed.**
