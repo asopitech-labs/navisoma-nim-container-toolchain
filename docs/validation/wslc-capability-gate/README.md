@@ -69,9 +69,7 @@ This is a flat, single-layer, unnamed rootfs (`WslcImportSessionImageFromFile`'s
 "docker import"-shaped semantics) — real evidence that the SDK can accept
 and run externally-supplied bytes, but *not* evidence for the Compose
 `build:` handoff claim, since a real build produces a multi-layer,
-self-naming image, not a bare rootfs tar. It is also reused, unmodified,
-by the cross-session isolation check (a session needs *some* runnable
-image, and this is the smallest one already on hand).
+self-naming image, not a bare rootfs tar.
 
 ### `archive-loader-evidence.tar` — the archive-loading evidence
 
@@ -116,35 +114,24 @@ creates/starts/execs a container from.
 fixtures must sit in the same directory at run time — [`run-probe.sh`](run-probe.sh)
 is the reproducible driver that stages them, runs the probe, and owns
 cleanup of the staged files afterward (the probe itself owns every WSLC
-resource and both caller-owned session storage directories):
+resource and its caller-owned session storage directory):
 
 ```bash
 ./run-probe.sh <probe.exe> <wslcsdk.dll> <import-fixture.tar> <archive-loader-evidence.tar> 2
 ```
 
-The probe uses fixed, deterministic resource names across two sessions
-(`navisoma-wslc-probe` / `navisoma-wslc-probe-iso`; containers include
-`-c1`, `-c2`, `-iso-c`, `-iso-peer`, `-iso-addrbump`, `-iso-posctrl`,
-`-rawimport`, `-archive`; volume `navisoma-wslc-probe-vol`; image tags
-under `navisoma-probe-*`/`navisoma-loaded-archive`) so that running it
-again only succeeds if the previous run's cleanup — including the driver's
-own staging-directory cleanup — was complete; the driver itself refuses to
+The probe uses fixed, deterministic resource names in one session
+(`navisoma-wslc-probe`; containers `-c1`, `-c2`, `-rawimport`, `-archive`;
+volume `navisoma-wslc-probe-vol`; image tags under
+`navisoma-probe-*`/`navisoma-loaded-archive`) so that running it again
+only succeeds if the previous run's cleanup — including the driver's own
+staging-directory cleanup — was complete; the driver itself refuses to
 stage over a directory that still exists. See
 [`../wslc-capability-gate.md`](../wslc-capability-gate.md) for recorded
-runs and the resulting capability table.
+runs and the resulting capability evidence.
 
-## Known WSLC behavior found while building this probe
-
-Each session's bridge allocates container addresses independently,
-starting from the same base (e.g. `172.17.0.2`) regardless of what
-addresses are already in use in a different, concurrently running session.
-A freshly created session's first container can therefore collide,
-address-string-for-address-string, with an unrelated container in another
-session — this was caught by the probe's own
-`cross_session_ip_addresses_distinct` check, which failed on the first
-attempt at the cross-session isolation test before a same-session
-"address bump" container (kept running, not just created-and-deleted --
-deleting one immediately frees its address back to the pool for instant
-reuse) was added to force the real peer container onto a different
-address. This is a real behavior worth knowing about for the eventual
-IP-allocation design of a WSLC backend, not just a probe artifact.
+This probe covers WSLC adapter capability evidence only (lifecycle,
+cleanup, same-session connectivity, volume, published port, process
+stdout/stderr/exit status/termination, and archive consumption). It is not
+evidence for or against whether NAVISOMA needs its own backend-neutral
+semantic core — see Issue #13.

@@ -5,8 +5,8 @@
 # fixture staging, which the probe itself cannot own (it can't copy its own
 # .exe into place before it exists). Responsibilities are split cleanly:
 #   - the probe (probe.c) owns every WSLC-side resource it creates
-#     (sessions, containers, images, volumes) AND the caller-owned session
-#     storage directories, deleting and verifying each one itself;
+#     (session, containers, images, volume) AND the caller-owned session
+#     storage directory, deleting and verifying each one itself;
 #   - this driver owns the staged input files (probe.exe, wslcsdk.dll, the
 #     two fixture tars) and the parent staging directory, deleting and
 #     verifying those after the probe exits.

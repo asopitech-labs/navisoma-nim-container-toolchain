@@ -80,7 +80,7 @@ volumes:
 
 | Canonical resource/action | Required dependency | containerd lowering | WSLC lowering | Result |
 |---|---|---|---|---|
-| Network `frontend` (create/remove) | none (project-scoped prerequisite) | supported — plugin-backed namespace scoped to the project; removed once its last attached container is gone | uncertain whether the backend exposes a project-scoped named network distinct from its single default network surface, rather than only that default | capability-gated: `network.named.isolated` — `E-NET-NAMED-UNSUPPORTED` |
+| Network `frontend` (create/remove) | none (project-scoped prerequisite) | supported — plugin-backed namespace scoped to the project; removed once its last attached container is gone | uncertain whether the backend exposes a project-scoped named network object that this project's services can attach to for connectivity | capability-gated: `network.named` — `E-NET-NAMED-UNSUPPORTED` |
 | Volume `web-data` (create/remove) | none | supported — managed persistent mount with a lifecycle independent of any one container | uncertain whether the backend offers a managed named-volume abstraction, versus only host-path bind mounts | capability-gated: `volume.named.persistent` — `E-VOL-NAMED-UNSUPPORTED` |
 | Image resolve (`web`) | none | supported — OCI registry pull into the content store | supported — OCI image resolution is a baseline capability of any OCI-conformant backend, not a Windows/WSL-specific one | supported |
 | Container create (`web`), attached to `frontend`, mounting `web-data` | image resolved; `frontend` created; `web-data` created | supported — OCI spec composed with the namespace + mount entries | create itself is baseline; the attachment inherits whichever gate its network/volume row resolves to | supported (inherits the network/volume rows' gate, not itself gated) |
@@ -89,6 +89,18 @@ volumes:
 | Wait for ready (running) | container started | supported | supported | supported |
 | Container stop | ready-state reached or shutdown requested | supported | supported | supported |
 | Container remove, then remove `web-data` / `frontend` | container stopped; no other consumers of the volume/network | supported | remove path inherits whatever gate its create-side row resolved to | supported (inherits the network/volume rows' gate) |
+
+**Scope note on `network.named`.** Case 1's network requirement is limited
+to representing `frontend` as a Canonical Model resource with a lifecycle
+(create/remove) that this project's services can attach to for
+connectivity, as a backend capability. It does **not** include isolating
+`frontend` from any other, unrelated Compose project, and it does not
+include supporting more than one independently-segmented network within a
+single project. Both of those are potential **future platform promises**,
+to be fixed as their own separate scenario if ever taken up, not part of
+this gate's minimal core. Reason: this gate judges whether NAVISOMA needs
+its own semantic core, not whether an existing runtime's isolation
+mechanism exists or not.
 
 **Action order (backend-neutral):**
 `create prerequisites (network `frontend`, volume `web-data`) → resolve image (`web`) → create container → start → publish port → wait (running) → stop → remove container → remove volume → remove network`
@@ -160,7 +172,7 @@ services:
   or an action-order step. Every vendor-shaped term stays inside a
   `lowering` column, as intended.
 - No row was classified **scope-breaking**. In every case where the two
-  backends might diverge — named network isolation, named volume
+  backends might diverge — the named network object, named volume
   persistence, TCP port publish under variable WSL networking modes,
   recurring exec-based health probing, and build-output image import — the
   divergence is representable as a named capability plus, at most, an
@@ -179,10 +191,13 @@ services:
 ## Recommendation for #13
 
 **proceed** — with the explicit condition that the five capabilities listed
-above (`network.named.isolated`, `volume.named.persistent`,
+above (`network.named`, `volume.named.persistent`,
 `port.publish.tcp`, `process.exec.recurring`, `build.imagestore.import`) are
 the required-capability checklist that #15 must confirm or refute on a real
 WSLC host before #13 can close. A confirmation upholds this recommendation
 unchanged; a refutation on any one of them should be re-litigated as a
 possible scope-breaking case for that capability specifically, not as a
-reason to discard the common model as a whole.
+reason to discard the common model as a whole. Cross-project network
+isolation and single-project multi-network segmentation are out of scope
+for this checklist — see the scope note under Case 1 — and are not part of
+#13's minimal-core feasibility gate.
