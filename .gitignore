@@ -2,3 +2,7 @@ nimcache/
 nimblecache/
 htmldocs/
 .spec-workflow/
+/navisoma
+/tests/test_health
+/tests/test_planner
+/tests/test_compose_parser

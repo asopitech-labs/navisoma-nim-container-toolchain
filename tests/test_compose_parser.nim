@@ -1,0 +1,62 @@
+## Minimal boundary tests for the restricted Compose parser
+## (src/navisoma/compose_parser.nim): the fixed MVP example must parse, and
+## a key outside the fixed MVP boundary must be rejected before planning
+## happens (per #18's semantic failure contract).
+
+import std/[unittest, options]
+import navisoma/types
+import navisoma/errors
+import navisoma/compose_parser
+
+const fixedExample = """
+services:
+  db:
+    image: registry.example.com/db:14
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "app"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+  api:
+    image: registry.example.com/api:2.1.0
+    depends_on:
+      db:
+        condition: service_healthy
+"""
+
+suite "restricted Compose parser":
+  test "parses the fixed MVP example":
+    let project = parseComposeProject(fixedExample)
+    check project.services.len == 2
+    let db = project.findService("db").get()
+    check db.image == "registry.example.com/db:14"
+    check db.healthcheck.isSome
+    check db.healthcheck.get().retries == 5
+    let api = project.findService("api").get()
+    check api.dependsOn.len == 1
+    check api.dependsOn[0].service == "db"
+
+  test "rejects a key outside the fixed MVP boundary (networks:)":
+    let source = """
+services:
+  web:
+    image: registry.example.com/web:1
+networks:
+  frontend: {}
+"""
+    expect SchemaError:
+      discard parseComposeProject(source)
+
+  test "rejects a depends_on condition other than service_healthy":
+    let source = """
+services:
+  api:
+    image: registry.example.com/api:1
+    depends_on:
+      db:
+        condition: service_started
+  db:
+    image: registry.example.com/db:1
+"""
+    expect SchemaError:
+      discard parseComposeProject(source)
