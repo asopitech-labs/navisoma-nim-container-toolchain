@@ -263,7 +263,19 @@ which is a necessary input to that question but not the answer to it.
 | Oracle | `c2`'s own IP read from `WslcInspectContainer`'s `IPAddress` field; `c1`'s exec stdout contains `navisoma-peer-ok`. |
 | Cleanup owner | SDK, via `WslcDeleteContainer`; postcondition checked (`peer_container_delete_postcondition`). |
 | Boundary | Intra-project connectivity within one session only. Whether a different, independently created session/project can or cannot reach this one is explicitly out of scope for this gate — see #14's scope note on `network.named` — and is not addressed by this row or anywhere else in this document. |
-| **Observed** | `intra_session_service_connectivity` passed on both runs. |
+| **Observed** | `intra_session_service_connectivity` passed on both runs — but see the gap noted below; this is narrower evidence than the row's own required shape. |
+
+**Gap, recorded rather than closed.** #14's `network.named` row requires a
+project-scoped **network resource with its own create/remove lifecycle**
+that services attach to. WSLC's C API has no such object at all —
+`wslcsdk.h` (682 lines, read in full) exposes only a per-container
+`WslcContainerNetworkingMode` enum (`NONE`/`BRIDGED`), no
+`WslcCreateNetwork`/list/delete function. The evidence above shows two
+`BRIDGED` containers in one session can reach each other; it does not show
+a named, independently lifecycle-managed network resource exists to model
+in the first place, because WSLC has nothing resembling one to test. This
+gap is not filled by further probing — see
+[`gate-13-decision.md`](gate-13-decision.md).
 
 ### 3. `volume.named.persistent` (#14 case 1)
 
@@ -320,9 +332,15 @@ implementation, per `work-instruction-policy.md`.
 
 ## Status
 
-This document records WSLC adapter capability evidence for the five
-capabilities #14 (as revised) requires. It does not itself conclude
-anything about #13. #13's question — whether NAVISOMA needs its own
-backend-neutral Canonical Model / Execution Graph — is decided from #14's
-semantic-model analysis together with evidence like this, not by this
-document alone. **#13 and #15 remain pending.**
+**#15 is closed, without further verification.** This document is the
+final record of the WSLC adapter capability evidence it collected — the
+rows under "WSLC adapter capability evidence" and "Baseline SDK lifecycle"
+above are retained as-is. Items this spike did not observe, including the
+full `network.named` resource-with-lifecycle shape discussed in capability
+2's gap note, are recorded as not observed rather than filled in with
+further probing.
+
+This evidence, together with #14's semantic-model analysis, was the basis
+for **#13's decision: revise the common semantic contract** — see
+[`gate-13-decision.md`](gate-13-decision.md) for the decision itself and
+its reasoning. **#13 is closed.**
