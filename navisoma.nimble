@@ -12,7 +12,8 @@ bin           = @["navisoma"]
 requires "nim >= 2.0.0"
 requires "yaml >= 2.2.1"
 
-task test, "Run the Phase 1 pure-semantics test suite":
+task test, "Run the Phase 1 pure-semantics and Phase 2 executor test suite":
   exec "nim c --path:src -r tests/test_health.nim"
   exec "nim c --path:src -r tests/test_planner.nim"
   exec "nim c --path:src -r tests/test_compose_parser.nim"
+  exec "nim c --path:src -r tests/test_executor.nim"

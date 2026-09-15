@@ -6,3 +6,4 @@ htmldocs/
 /tests/test_health
 /tests/test_planner
 /tests/test_compose_parser
+/tests/test_executor
