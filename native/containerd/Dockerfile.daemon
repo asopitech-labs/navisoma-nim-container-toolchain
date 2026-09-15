@@ -1,0 +1,35 @@
+# Disposable containerd daemon for #18 Phase 3 real-host verification/scenario testing.
+#
+# Per project direction, containerd itself is never installed on the host — every real-daemon
+# test runs against a fresh instance of this image, started and torn down per run
+# (native/containerd/dev-daemon.sh), never a persistent fixture.
+#
+# Pinned to the SAME containerd release the client stubs were generated from
+# (native/containerd/proto/MANIFEST.md, native/containerd/generated/MANIFEST.md) — using the
+# upstream static release binary directly, not the distro package, so the daemon under test is
+# exactly the pinned version rather than whatever Ubuntu happens to carry.
+
+FROM ubuntu:24.04
+
+ARG CONTAINERD_VERSION=2.3.5
+ARG RUNC_VERSION=1.5.1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl tar \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}/containerd-static-${CONTAINERD_VERSION}-linux-amd64.tar.gz" -o /tmp/containerd.tar.gz \
+    && tar -C /usr/local -xzf /tmp/containerd.tar.gz \
+    && rm /tmp/containerd.tar.gz
+
+RUN curl -fsSL "https://github.com/opencontainers/runc/releases/download/v${RUNC_VERSION}/runc.amd64" -o /usr/local/sbin/runc \
+    && chmod +x /usr/local/sbin/runc
+
+ENV PATH="/usr/local/bin:/usr/local/sbin:${PATH}"
+
+RUN mkdir -p /etc/containerd /var/lib/containerd /run/containerd
+COPY config.toml /etc/containerd/config.toml
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

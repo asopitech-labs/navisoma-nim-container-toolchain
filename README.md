@@ -116,6 +116,7 @@ Compatibility claims require specification/reference/differential tests and real
 - [`docs/native-c-cpp-integration-plan.md`](docs/native-c-cpp-integration-plan.md) — locked implementation paths for WSLC, protobuf/gRPC, containerd, BuildKit, JSON Schema, ABI, code generation, native builds and dependency packaging.
 - [`docs/validation/work-instruction-policy.md`](docs/validation/work-instruction-policy.md) — evidence contract and review rules for validation work.
 - [`docs/architecture.md`](docs/architecture.md) — semantic core, native integration boundaries, backends, and testing.
+- [`docs/containerd-dev-environment.md`](docs/containerd-dev-environment.md) — the containerd backend's pinned version, container-based build/test workflow, and gotchas discovered implementing it.
 - [`docs/repository-strategy.md`](docs/repository-strategy.md) — extraction criteria and reduced repository plan.
 
 ## Status

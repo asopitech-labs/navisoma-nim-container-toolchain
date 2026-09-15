@@ -23,6 +23,18 @@ type
     ## the real clock, an environment variable, or any global state
     ## (#18 phase 2 timing rule).
 
+proc newRealProbeClock*(): ProbeClock =
+  ## A real wall-clock `ProbeClock` for a real (non-fake) backend adapter. The closure has no
+  ## signal for "a new service's health-awaiting has begun" other than `attempt` resetting to
+  ## 0 (the executor always starts each service's `AwaitHealth` loop at attempt 0), so it treats
+  ## that as the reference point and returns elapsed wall-clock time relative to it thereafter.
+  var start: Time
+  result = proc (attempt: int): Duration =
+    let now = getTime()
+    if attempt == 0:
+      start = now
+    now - start
+
 proc cleanup(port: BackendPort, journal: seq[string]) =
   ## Reverse-order stop/remove of exactly the services this invocation
   ## actually created, per the journal passed in — never the full plan,

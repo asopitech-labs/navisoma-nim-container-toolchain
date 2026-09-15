@@ -1,0 +1,16 @@
+services:
+  db:
+    image: docker.io/library/busybox:latest
+    command: ["sleep", "3600"]
+    healthcheck:
+      test: ["true"]
+      interval: 1s
+      timeout: 5s
+      retries: 3
+      start_period: 0s
+  api:
+    image: docker.io/library/busybox:latest
+    command: ["sleep", "3600"]
+    depends_on:
+      db:
+        condition: service_healthy

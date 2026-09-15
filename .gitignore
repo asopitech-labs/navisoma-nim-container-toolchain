@@ -7,3 +7,4 @@ htmldocs/
 /tests/test_planner
 /tests/test_compose_parser
 /tests/test_executor
+/native/containerd/.dev-run/

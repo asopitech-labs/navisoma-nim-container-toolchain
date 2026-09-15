@@ -1,15 +1,24 @@
-## CLI skeleton per #18's "User operations": `plan`, `up`, `down`, each
-## taking `--backend <containerd|wslc>` and a Compose file path.
+## CLI per #18's "User operations": `plan`, `up`, `down`, each taking
+## `--backend <containerd|wslc>` and a Compose file path.
 ##
-## Phase 1 (this commit) has no backend port or executor yet (#18 phases
-## 2-4), so `plan` is fully functional — it only needs the pure parser and
-## planner — while `up`/`down` report themselves unimplemented and exit
-## non-zero rather than silently doing nothing or pretending to succeed.
+## `plan` only needs the pure parser and planner. `up`/`down` additionally
+## need a real BackendPort: the containerd adapter (#18 phase 3) is wired
+## in when this binary is built with -d:navisomaContainerd (see
+## src/native/containerd_raw.nim's own comment on why that flag exists —
+## the containerd backend needs native toolchain/headers this project
+## never assumes are present on an arbitrary build machine); wslc has no
+## adapter yet (#18 phase 4) and still reports itself unimplemented.
 
 import std/[strutils, options]
+import ./types
 import ./compose_parser
 import ./planner
 import ./errors
+import ./executor
+import ./backend
+
+when defined(navisomaContainerd):
+  import ./backends/containerd_backend
 
 type
   Backend* = enum
@@ -58,10 +67,72 @@ proc cmdPlan(args: seq[string]): int =
     stderr.writeLine("error: " & e.msg)
     return 1
 
-proc cmdUnimplemented(command: string): int =
-  stderr.writeLine("error: 'navisoma " & command &
-    "' has no backend executor yet (#18 phases 2-4 are not implemented)")
-  1
+proc readProjectOrFail(file: string): ComposeProject =
+  let source =
+    try:
+      readFile(file)
+    except IOError as e:
+      raise newException(NavisomaError, "cannot read '" & file & "': " & e.msg)
+  parseComposeProject(source)
+
+proc cmdUp(args: seq[string]): int =
+  let parsed = parseArgs(args)
+  if parsed.backend.isNone or parsed.file.isNone:
+    stderr.writeLine("usage: navisoma up --backend <containerd|wslc> <compose.yaml>")
+    return 1
+  let backend = parseBackend(parsed.backend.get())
+  try:
+    let project = readProjectOrFail(parsed.file.get())
+    case backend
+    of backendContainerd:
+      when defined(navisomaContainerd):
+        let (port, client) = newContainerdPort()
+        defer: client.close()
+        discard runUp(project, port, newRealProbeClock())
+        return 0
+      else:
+        stderr.writeLine("error: this build has no containerd backend compiled in " &
+          "(build with -d:navisomaContainerd)")
+        return 1
+    of backendWslc:
+      stderr.writeLine("error: 'navisoma up' has no wslc backend yet (#18 phase 4)")
+      return 1
+  except NavisomaError as e:
+    stderr.writeLine("error: " & e.msg)
+    return 1
+
+proc cmdDown(args: seq[string]): int =
+  let parsed = parseArgs(args)
+  if parsed.backend.isNone or parsed.file.isNone:
+    stderr.writeLine("usage: navisoma down --backend <containerd|wslc> <compose.yaml>")
+    return 1
+  let backend = parseBackend(parsed.backend.get())
+  try:
+    let project = readProjectOrFail(parsed.file.get())
+    case backend
+    of backendContainerd:
+      when defined(navisomaContainerd):
+        let (port, client) = newContainerdPort()
+        defer: client.close()
+        # Deterministically reverse-order stop/remove exactly the services `up` would have
+        # created for this fixture (planDown's own contract) — idempotent per service even if
+        # some were never actually running, since the adapter's stop/remove tolerate "not found".
+        for action in planDown(planUp(project)):
+          case action.kind
+          of akStopContainer: port.stopContainer(action.service)
+          of akRemoveContainer: port.removeContainer(action.service)
+          else: discard
+        return 0
+      else:
+        stderr.writeLine("error: this build has no containerd backend compiled in " &
+          "(build with -d:navisomaContainerd)")
+        return 1
+    of backendWslc:
+      stderr.writeLine("error: 'navisoma down' has no wslc backend yet (#18 phase 4)")
+      return 1
+  except NavisomaError as e:
+    stderr.writeLine("error: " & e.msg)
+    return 1
 
 proc runCli*(args: seq[string]): int =
   if args.len == 0:
@@ -69,8 +140,8 @@ proc runCli*(args: seq[string]): int =
     return 1
   case args[0]
   of "plan": cmdPlan(args[1 .. ^1])
-  of "up": cmdUnimplemented("up")
-  of "down": cmdUnimplemented("down")
+  of "up": cmdUp(args[1 .. ^1])
+  of "down": cmdDown(args[1 .. ^1])
   else:
     stderr.writeLine("error: unknown command '" & args[0] & "'")
     1

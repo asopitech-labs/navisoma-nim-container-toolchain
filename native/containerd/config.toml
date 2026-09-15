@@ -1,0 +1,22 @@
+# Minimal disposable-daemon config for #18 Phase 3 verification. NAVISOMA's MVP scope needs
+# only the core Images/Containers/Tasks/Snapshots/Transfer services over the default socket —
+# no CRI/Kubernetes surface, no networking plugin.
+version = 3
+
+root = "/var/lib/containerd"
+state = "/run/containerd"
+
+[grpc]
+  address = "/run/containerd/containerd.sock"
+
+# The transfer plugin's default unpack config only knows the daemon's default snapshotter
+# (overlayfs on Linux) — without an explicit entry here, a Transfer request that asks to unpack
+# into any other snapshotter fails with "no unpack platforms defined" (no configured combination
+# matches). The shim (native/containerd/shim/containerd_bridge.cc) always requests the "native"
+# snapshotter — see dev-daemon.sh for why overlayfs itself doesn't work nested in this dev
+# daemon — so that combination must be registered explicitly.
+[plugins."io.containerd.transfer.v1.local"]
+  [[plugins."io.containerd.transfer.v1.local".unpack_config]]
+    platform = "linux/amd64"
+    snapshotter = "native"
+    differ = "walking"
