@@ -25,19 +25,36 @@ suite "planner":
       discard planUp(project)
 
   test "a depends_on cycle is rejected":
+    # Both sides need a healthcheck so the cycle check, not the
+    # missing-healthcheck check, is what's under test here.
     let project = ComposeProject(services: @[
-      svc("a", dependsOn = @["b"]),
-      svc("b", dependsOn = @["a"])
+      svc("a", healthcheck = true, dependsOn = @["b"]),
+      svc("b", healthcheck = true, dependsOn = @["a"])
     ])
     expect PlanningError:
       discard planUp(project)
 
   test "a service depending on itself is rejected as a cycle":
     let project = ComposeProject(services: @[
-      svc("a", dependsOn = @["a"])
+      svc("a", healthcheck = true, dependsOn = @["a"])
     ])
     expect PlanningError:
       discard planUp(project)
+
+  test "depends_on service_healthy targeting a service without a healthcheck is rejected, and no actions are generated":
+    let project = ComposeProject(services: @[
+      svc("api", dependsOn = @["db"]),
+      svc("db") # no healthcheck
+    ])
+    expect ComposeSemanticError:
+      discard planUp(project)
+    var producedAnyAction = false
+    try:
+      discard planUp(project)
+      producedAnyAction = true
+    except ComposeSemanticError:
+      discard
+    check not producedAnyAction
 
   test "a healthy dependency is planned, started, and awaited before its dependent, deterministically":
     let project = ComposeProject(services: @[

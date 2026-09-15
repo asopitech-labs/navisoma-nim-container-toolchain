@@ -89,12 +89,15 @@ proc parseHealthcheck(node: YamlNode, context: string): HealthCheckSpec =
   checkAllowedKeys(node, SupportedHealthcheckKeys, context)
   result = HealthCheckSpec(retries: 3, interval: initDuration(seconds = 30),
                             timeout: initDuration(seconds = 30), startPeriod: initDuration())
-  if node.hasKey("test"):
-    let testNode = node["test"]
-    result.test = @[]
-    discard requireSequence(testNode, context & ".test")
-    for elem in testNode.elems:
-      result.test.add requireScalar(elem, context & ".test element")
+  if not node.hasKey("test"):
+    fail(context & ".test is required and must be a non-empty sequence")
+  let testNode = node["test"]
+  discard requireSequence(testNode, context & ".test")
+  if testNode.len == 0:
+    fail(context & ".test must not be empty")
+  result.test = @[]
+  for elem in testNode.elems:
+    result.test.add requireScalar(elem, context & ".test element")
   if node.hasKey("interval"):
     result.interval = parseDuration(requireScalar(node["interval"], context & ".interval"), context & ".interval")
   if node.hasKey("timeout"):
@@ -107,6 +110,12 @@ proc parseHealthcheck(node: YamlNode, context: string): HealthCheckSpec =
       result.retries = parseInt(raw)
     except ValueError:
       fail(context & ".retries: '" & raw & "' is not an integer")
+  if result.retries <= 0:
+    fail(context & ".retries must be a positive integer")
+  if result.interval.inMilliseconds <= 0:
+    fail(context & ".interval must be a positive duration")
+  if result.timeout.inMilliseconds <= 0:
+    fail(context & ".timeout must be a positive duration")
 
 proc parseDependsOn(node: YamlNode, context: string): seq[DependsOnEdge] =
   discard requireMapping(node, context)

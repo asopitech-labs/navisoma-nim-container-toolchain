@@ -26,17 +26,27 @@ proc `$`*(a: Action): string =
   ActionDisplayName[a.kind] & "(" & a.service & ")"
 
 proc validate(project: ComposeProject) =
-  ## Two structural checks over the `depends_on` graph. Both run to
-  ## completion and report every violation found, rather than stopping at
-  ## the first one, so a caller sees the whole rejection reason at once.
+  ## Structural checks over the `depends_on` graph. Each check runs to
+  ## completion and reports every violation it finds, rather than stopping
+  ## at the first one, so a caller sees the whole rejection reason at once.
   var unknownRefs: seq[string]
+  var missingHealthcheckRefs: seq[string]
   for svc in project.services:
     for edge in svc.dependsOn:
       if not project.hasService(edge.service):
         unknownRefs.add(svc.name & " -> " & edge.service)
+      elif project.findService(edge.service).get().healthcheck.isNone:
+        # `condition: service_healthy` is the only depends_on condition
+        # this MVP boundary supports (types.nim), so every edge implies a
+        # health gate; a target with no healthcheck can never satisfy it.
+        missingHealthcheckRefs.add(svc.name & " -> " & edge.service)
   if unknownRefs.len > 0:
     raise newException(ComposeSemanticError,
       "depends_on references unknown service(s): " & unknownRefs.join(", "))
+  if missingHealthcheckRefs.len > 0:
+    raise newException(ComposeSemanticError,
+      "depends_on condition service_healthy requires the target service to " &
+      "declare a healthcheck: " & missingHealthcheckRefs.join(", "))
 
 proc topoOrder(project: ComposeProject): seq[string] =
   ## Kahn's algorithm, seeded and tie-broken strictly by declaration order,

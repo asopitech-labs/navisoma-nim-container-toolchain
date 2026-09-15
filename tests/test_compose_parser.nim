@@ -60,3 +60,72 @@ services:
 """
     expect SchemaError:
       discard parseComposeProject(source)
+
+  test "rejects a healthcheck with no test":
+    let source = """
+services:
+  db:
+    image: registry.example.com/db:1
+    healthcheck:
+      interval: 5s
+      timeout: 3s
+      retries: 5
+"""
+    expect SchemaError:
+      discard parseComposeProject(source)
+
+  test "rejects a healthcheck with an empty test sequence":
+    let source = """
+services:
+  db:
+    image: registry.example.com/db:1
+    healthcheck:
+      test: []
+      interval: 5s
+      timeout: 3s
+      retries: 5
+"""
+    expect SchemaError:
+      discard parseComposeProject(source)
+
+  test "rejects healthcheck.retries <= 0":
+    for badRetries in ["0", "-1"]:
+      let source = """
+services:
+  db:
+    image: registry.example.com/db:1
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 5s
+      timeout: 3s
+      retries: """ & badRetries & "\n"
+      expect SchemaError:
+        discard parseComposeProject(source)
+
+  test "rejects healthcheck.interval <= 0":
+    let source = """
+services:
+  db:
+    image: registry.example.com/db:1
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 0s
+      timeout: 3s
+      retries: 5
+"""
+    expect SchemaError:
+      discard parseComposeProject(source)
+
+  test "rejects healthcheck.timeout <= 0":
+    let source = """
+services:
+  db:
+    image: registry.example.com/db:1
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 5s
+      timeout: 0s
+      retries: 5
+"""
+    expect SchemaError:
+      discard parseComposeProject(source)
