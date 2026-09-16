@@ -39,7 +39,9 @@
 #include <cctype>
 #include <chrono>
 #include <cstring>
+#include <functional>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -99,15 +101,35 @@ constexpr const char* kDefaultPathEnv = "PATH=/usr/local/sbin:/usr/local/bin:/us
 
 } // namespace
 
-// The env and numeric uid/gid a container was actually created with (see create_container's
-// mergeEnv/parseNumericUser) — cached so exec_health_probe can run the health command with the
-// same environment and identity as the container's own process instead of a bare, root-owned
-// shell. Populated on a successful create_container, erased on remove_container.
+// The env, cwd, and numeric uid/gid a container was actually created with (see
+// create_container's mergeEnv/parseNumericUser) — cached so exec_health_probe can run the health
+// command with the same environment, working directory, and identity as the container's own
+// process instead of a bare, root-owned shell rooted at "/". Populated on a successful
+// create_container, erased on remove_container.
 struct nvsm_container_runtime_info {
   std::vector<std::string> env;
+  std::string cwd;
   uint32_t uid = 0;
   uint32_t gid = 0;
 };
+
+namespace {
+// Runs `fn` when it goes out of scope — on a normal `return` *and* on exception unwinding —
+// unless `dismiss()` was called first. create_container uses this so every partial-failure path
+// (including a C++ exception thrown after a native resource was already created, not just the
+// explicit `if (!status.ok())` branches) reliably undoes what it already created.
+class ScopeGuard {
+public:
+  explicit ScopeGuard(std::function<void()> fn) : fn_(std::move(fn)) {}
+  ~ScopeGuard() { if (armed_ && fn_) fn_(); }
+  void dismiss() { armed_ = false; }
+  ScopeGuard(const ScopeGuard&) = delete;
+  ScopeGuard& operator=(const ScopeGuard&) = delete;
+private:
+  std::function<void()> fn_;
+  bool armed_ = true;
+};
+} // namespace
 
 struct nvsm_containerd_client {
   std::string ns;
@@ -302,14 +324,38 @@ std::vector<std::string> mergeArgs(const json& imageConfig, const std::vector<st
   return args;
 }
 
+// Compose's `environment:` must override the image's own default for the same key, never sit
+// alongside it — a duplicate-keyed OCI process env (both "PATH=/a" and "PATH=/b") is exactly the
+// kind of thing whose resolution depends on which libc reads it first, since exec(3) does not
+// deduplicate envp itself. This replaces an existing key in place instead of appending a second
+// entry, so exactly one value for each key ever reaches the process.
 std::vector<std::string> mergeEnv(const json& imageConfig,
                                    const std::vector<std::pair<std::string, std::string>>& env) {
   std::vector<std::string> result;
+  std::unordered_map<std::string, size_t> indexByKey;
+  auto setOrAppend = [&](const std::string& key, const std::string& value) {
+    std::string entry = key + "=" + value;
+    auto it = indexByKey.find(key);
+    if (it != indexByKey.end()) {
+      result[it->second] = std::move(entry);
+    } else {
+      indexByKey[key] = result.size();
+      result.push_back(std::move(entry));
+    }
+  };
   if (imageConfig.contains("Env") && imageConfig.at("Env").is_array()) {
-    for (const auto& e : imageConfig.at("Env")) result.push_back(e.get<std::string>());
+    for (const auto& e : imageConfig.at("Env")) {
+      std::string entry = e.get<std::string>();
+      auto eq = entry.find('=');
+      if (eq == std::string::npos) {
+        result.push_back(entry); // malformed image env entry; keep as-is rather than drop it
+        continue;
+      }
+      setOrAppend(entry.substr(0, eq), entry.substr(eq + 1));
+    }
   }
   for (const auto& kv : env) {
-    result.push_back(kv.first + "=" + kv.second);
+    setOrAppend(kv.first, kv.second);
   }
   return result;
 }
@@ -320,6 +366,23 @@ std::vector<std::string> mergeEnv(const json& imageConfig,
 // reading /etc/passwd or /etc/group out of the image's rootfs, which this narrow shim does not
 // do; such an image is rejected explicitly rather than silently falling back to root, since
 // silently running a non-root-intended image as root is a worse outcome than failing loudly.
+// Parses one numeric id component, rejecting anything that would silently wrap when narrowed to
+// uint32_t (e.g. "4294967296" == 2^32 fits in `unsigned long` on a 64-bit host and would
+// truncate to 0 — root — without this check) and anything std::stoul itself rejects or can't
+// represent.
+bool parseUintId(const std::string& part, uint32_t& out) {
+  if (part.empty()) return false;
+  for (unsigned char c : part) if (!std::isdigit(c)) return false;
+  try {
+    unsigned long value = std::stoul(part);
+    if (value > std::numeric_limits<uint32_t>::max()) return false;
+    out = static_cast<uint32_t>(value);
+    return true;
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+
 bool parseNumericUser(const std::string& raw, uint32_t& uid, uint32_t& gid) {
   uid = 0;
   gid = 0;
@@ -327,13 +390,8 @@ bool parseNumericUser(const std::string& raw, uint32_t& uid, uint32_t& gid) {
   auto colon = raw.find(':');
   std::string uidPart = colon == std::string::npos ? raw : raw.substr(0, colon);
   std::string gidPart = colon == std::string::npos ? std::string() : raw.substr(colon + 1);
-  if (uidPart.empty()) return false;
-  for (unsigned char c : uidPart) if (!std::isdigit(c)) return false;
-  uid = static_cast<uint32_t>(std::stoul(uidPart));
-  if (!gidPart.empty()) {
-    for (unsigned char c : gidPart) if (!std::isdigit(c)) return false;
-    gid = static_cast<uint32_t>(std::stoul(gidPart));
-  }
+  if (!parseUintId(uidPart, uid)) return false;
+  if (!gidPart.empty() && !parseUintId(gidPart, gid)) return false;
   return true;
 }
 
@@ -522,22 +580,22 @@ nvsm_containerd_result* nvsm_containerd_create_container(
       return failResult("snapshots.prepare: " + status.error_message());
     }
 
-    // From here on, any failure must undo the snapshot (and, once created, the container record)
-    // this call already made — otherwise a partially-created container is left behind under `id`
-    // and the next `up` for the same service fails with "already exists" instead of retrying
-    // cleanly.
-    auto rollbackSnapshot = [&]() {
+    // From here on, any failure — an explicit `!status.ok()` *or* a C++ exception thrown anywhere
+    // below (e.g. from json/protobuf calls) — must undo the snapshot (and, once created, the
+    // container record) this call already made, otherwise a partially-created container is left
+    // behind under `id` and the next `up` for the same service fails with "already exists"
+    // instead of retrying cleanly. ScopeGuard fires on both paths; dismissed only on full success.
+    ScopeGuard snapshotGuard([&]() {
       RemoveSnapshotRequest req;
       req.set_snapshotter(kSnapshotter);
       req.set_key(id);
       auto ctx = newCtx(client);
       google::protobuf::Empty resp;
       client->snapshots->Remove(ctx.get(), req, &resp); // best-effort
-    };
+    });
 
     std::vector<std::string> args = mergeArgs(rootfs.config, cmd);
     if (args.empty()) {
-      rollbackSnapshot();
       return failResult("service '" + id + "' has no command and the image has no default CMD/ENTRYPOINT");
     }
     std::vector<std::string> envStrings = mergeEnv(rootfs.config, env);
@@ -560,9 +618,16 @@ nvsm_containerd_result* nvsm_containerd_create_container(
     containerd::services::containers::v1::CreateContainerResponse createResp;
     status = client->containers->Create(ctx2.get(), createReq, &createResp);
     if (!status.ok()) {
-      rollbackSnapshot();
       return failResult("containers.create: " + status.error_message());
     }
+
+    ScopeGuard containerGuard([&]() {
+      DeleteContainerRequest delReq;
+      delReq.set_id(id);
+      auto delCtx = newCtx(client);
+      google::protobuf::Empty delResp;
+      client->containers->Delete(delCtx.get(), delReq, &delResp); // best-effort
+    });
 
     CreateTaskRequest taskReq;
     taskReq.set_container_id(id);
@@ -579,16 +644,12 @@ nvsm_containerd_result* nvsm_containerd_create_container(
     containerd::services::tasks::v1::CreateTaskResponse taskResp;
     status = client->tasks->Create(ctx3.get(), taskReq, &taskResp);
     if (!status.ok()) {
-      DeleteContainerRequest delReq;
-      delReq.set_id(id);
-      auto delCtx = newCtx(client);
-      google::protobuf::Empty delResp;
-      client->containers->Delete(delCtx.get(), delReq, &delResp); // best-effort
-      rollbackSnapshot();
       return failResult("tasks.create: " + status.error_message());
     }
 
-    client->containerInfo[id] = nvsm_container_runtime_info{envStrings, uid, gid};
+    client->containerInfo[id] = nvsm_container_runtime_info{envStrings, cwd, uid, gid};
+    containerGuard.dismiss();
+    snapshotGuard.dismiss();
     return okResult();
   } catch (const std::exception& e) {
     return failResult(e.what());
@@ -623,15 +684,17 @@ nvsm_containerd_result* nvsm_containerd_exec_health_probe(
     for (size_t i = 0; i < test_len; i++) args.emplace_back(test[i], test_lens[i]);
 
     std::string execId = "probe-" + std::to_string(++client->execCounter);
-    // Run the probe with the same env and identity the container itself was created with (see
-    // create_container) — falls back to a bare PATH only if that lookup somehow misses, since a
-    // probe must never crash for want of an env.
+    // Run the probe with the same env, cwd, and identity the container itself was created with
+    // (see create_container) — a relative-path healthcheck command otherwise resolves against
+    // "/" instead of the image's actual WorkingDir. Falls back to a bare PATH rooted at "/" only
+    // if that lookup somehow misses, since a probe must never crash for want of an env.
     auto infoIt = client->containerInfo.find(id);
-    std::vector<std::string> env = infoIt != client->containerInfo.end()
-        ? infoIt->second.env : std::vector<std::string>{kDefaultPathEnv};
-    uint32_t uid = infoIt != client->containerInfo.end() ? infoIt->second.uid : 0;
-    uint32_t gid = infoIt != client->containerInfo.end() ? infoIt->second.gid : 0;
-    json processJson = buildProcessJson(args, env, "/", uid, gid);
+    bool haveInfo = infoIt != client->containerInfo.end();
+    std::vector<std::string> env = haveInfo ? infoIt->second.env : std::vector<std::string>{kDefaultPathEnv};
+    std::string cwd = haveInfo ? infoIt->second.cwd : std::string();
+    uint32_t uid = haveInfo ? infoIt->second.uid : 0;
+    uint32_t gid = haveInfo ? infoIt->second.gid : 0;
+    json processJson = buildProcessJson(args, env, cwd, uid, gid);
 
     ExecProcessRequest execReq;
     execReq.set_container_id(id);

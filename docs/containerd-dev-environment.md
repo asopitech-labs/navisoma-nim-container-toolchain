@@ -87,7 +87,25 @@ supported via `CONTAINER_ENGINE=docker`).
 - **The image's `User` config is honored, numeric forms only** (`"1000"` or `"1000:1000"`) — a
   named user/group would require reading `/etc/passwd`/`/etc/group` out of the image's rootfs,
   which this shim does not do; such an image is rejected explicitly (`create_container` fails)
-  rather than silently running as root.
+  rather than silently running as root. Each numeric component is also range-checked against
+  `uint32_t` before the narrowing cast — `std::stoul` alone would let e.g. `"4294967296"` (2^32)
+  through and silently wrap to uid 0 on cast.
+- **`exec_health_probe` also reuses the container's own `WorkingDir`**, cached alongside env/uid/
+  gid — a relative-path healthcheck command must resolve against the same directory the main
+  process runs in, not an unconditional `/`.
+- **`mergeEnv` replaces a key in place instead of appending a duplicate.** An OCI process env with
+  two `PATH=` entries doesn't error, but which one `getenv`/`$VAR` resolves to depends on the
+  reading process's own scan order (glibc: first match) — Compose's `environment:` must be the one
+  that wins for a key the image already sets, not silently lose depending on array order.
+- **`create_container`'s rollback is RAII (`ScopeGuard`), not manual calls per failure branch** —
+  a partially-created snapshot/container must be undone on a C++ exception thrown after it was
+  created (e.g. a `json`/protobuf call), not only on the `if (!status.ok())` paths that were the
+  only cases handled before.
+- **The integration suite explicitly warms the image cache before any timed fixture.** A cold
+  registry pull's latency is real-world network variance, not anything navisoma's own code
+  controls — observed to occasionally exceed even a generous per-invocation ceiling in this dev
+  environment. Pulling once upfront (content only, no `--unpack`) keeps that variance out of every
+  fixture's own correctness assertions.
 
 ## Verifying this still works
 

@@ -1,0 +1,18 @@
+services:
+  db:
+    image: docker.io/library/busybox:latest
+    command: ["sleep", "3600"]
+    environment:
+      # busybox's own image config already sets PATH to a longer default (confirmed via `podman
+      # inspect`: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin") — this override
+      # must fully replace that value in the merged env, not sit alongside it as a second "PATH="
+      # entry (mergeEnv's own regression). "/bin" is deliberately different from the default *and*
+      # still resolves busybox's applets (all symlinked under /bin only), so the main process
+      # (`sleep 3600`) keeps working under the override too.
+      PATH: /bin
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$PATH\" = /bin"]
+      interval: 1s
+      timeout: 5s
+      retries: 3
+      start_period: 0s

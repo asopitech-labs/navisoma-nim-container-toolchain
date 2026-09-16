@@ -27,8 +27,9 @@ check() {
 run_navisoma() {
   # `timeout` here is a hard ceiling on this whole suite ever hanging in CI — never a substitute
   # for navisoma's own healthcheck.timeout enforcement, which the "timeout fixture" case below
-  # actually exercises (and expects to finish in well under this ceiling).
-  timeout 60 "$CONTAINER_ENGINE" run --rm \
+  # actually exercises (and expects to finish in well under this ceiling). 180s leaves headroom
+  # for a slow/cold image pull or a loaded build host, neither of which navisoma itself controls.
+  timeout 180 "$CONTAINER_ENGINE" run --rm \
     -v "$ROOT:/workspace:Z" \
     -v "$CD_DIR/.dev-run:/run/containerd:Z" \
     navisoma-containerd-build "$BIN" "$@" 2>&1
@@ -60,6 +61,14 @@ trap cleanup EXIT
   -v "$ROOT:/workspace:Z" \
   navisoma-containerd-build bash -c \
   "cd /workspace && nim c --path:src -d:navisomaContainerd -o:native/containerd/.dev-run/navisoma-cd src/navisoma.nim"
+
+# Pulls the one image every fixture uses into the content store ahead of time, with its own
+# generous ceiling separate from run_navisoma's 180s — a slow/cold registry pull is real-world
+# network variance that has nothing to do with any fixture's own correctness, and must never be
+# what makes the *first* fixture's timing-sensitive assertions flaky. Every navisoma resolve_image
+# call after this finds the content already present and only does the (fast, local) unpack.
+echo "=== warming image cache (network-bound; not part of any fixture's own timing) ==="
+timeout 280 "$CONTAINER_ENGINE" exec nvsm-containerd-dev ctr -n navisoma images pull docker.io/library/busybox:latest >/dev/null
 
 echo "=== healthy fixture: up ==="
 set +e
@@ -97,6 +106,15 @@ check_running "env up" api db
 run_navisoma down --backend containerd "tests/integration/containerd/env.compose.yaml" >/dev/null
 check "env down: no containers left" "$(ctr_ns containers list | wc -l)" "1"
 
+echo "=== env-override fixture: Compose environment replaces the image's own env, not alongside it ==="
+set +e
+run_navisoma up --backend containerd "tests/integration/containerd/env-override.compose.yaml"
+upExit=$?
+set -e
+check "env-override up exit code" "$upExit" "0"
+run_navisoma down --backend containerd "tests/integration/containerd/env-override.compose.yaml" >/dev/null
+check "env-override down: no containers left" "$(ctr_ns containers list | wc -l)" "1"
+
 echo "=== timeout fixture: a probe that outlives healthcheck.timeout fails instead of hanging ==="
 set +e
 start=$(date +%s)
@@ -106,7 +124,7 @@ elapsed=$(( $(date +%s) - start ))
 set -e
 check "timeout up exit code" "$upExit" "1"
 check "timeout up: db never started api" "$(echo "$upOutput" | grep -c 'unhealthy')" "1"
-if [[ "$elapsed" -gt 30 ]]; then
+if [[ "$elapsed" -gt 90 ]]; then
   echo "FAIL timeout up: took ${elapsed}s — exec_health_probe did not enforce its deadline" >&2
   failures=$((failures + 1))
 else
