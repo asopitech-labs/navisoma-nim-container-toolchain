@@ -65,8 +65,10 @@ nvsm_containerd_result* nvsm_containerd_resolve_image(
 
 // Prepares a rootfs snapshot (the "native" snapshotter — see native/containerd/dev-daemon.sh for
 // why), creates the containerd Container record, and creates (but does not start) its task.
-// `service_name` becomes the containerd container/task id directly — the MVP's fixed Compose
-// service-name alphabet is containerd-id-safe, so no separate id-mapping table is needed.
+// `service_name` becomes the containerd container/task id directly — no separate id-mapping
+// table is needed here because the caller (containerd_backend.nim's `newContainerdPort`) already
+// namespaces it per compose-file invocation (`nvsm-<projectId>-<service>`) before it ever reaches
+// this boundary, so what arrives here is already containerd-id-safe and globally unique.
 nvsm_containerd_result* nvsm_containerd_create_container(
     nvsm_containerd_client* client,
     const char* service_name, size_t service_name_len,
@@ -79,13 +81,16 @@ nvsm_containerd_result* nvsm_containerd_start_container(
     nvsm_containerd_client* client,
     const char* service_name, size_t service_name_len);
 
-// Runs `test` as a one-shot exec inside the already-started task and waits for it to exit.
-// Result's exit code is the probe outcome (backend.nim's ProbeResult.exitCode) — the shim never
-// interprets 0/nonzero itself, that's health.nim's job.
+// Runs `test` as a one-shot exec inside the already-started task and waits up to `timeout_ms`
+// for it to exit. Result's exit code is the probe outcome (backend.nim's ProbeResult.exitCode)
+// — the shim never interprets 0/nonzero itself, that's health.nim's job. A probe that is still
+// running when `timeout_ms` elapses is treated as a failed probe (exit code 124, the conventional
+// "timed out" code), not a backend error: it is best-effort killed and the call still returns ok.
 nvsm_containerd_result* nvsm_containerd_exec_health_probe(
     nvsm_containerd_client* client,
     const char* service_name, size_t service_name_len,
-    const char* const* test, const size_t* test_lens, size_t test_len);
+    const char* const* test, const size_t* test_lens, size_t test_len,
+    long long timeout_ms);
 
 nvsm_containerd_result* nvsm_containerd_stop_container(
     nvsm_containerd_client* client,

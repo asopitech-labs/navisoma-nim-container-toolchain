@@ -11,6 +11,7 @@
 ## state's type never appears here, so it can never leak into the
 ## executor, planner, or CLI.
 
+import std/times
 import ./types
 
 type
@@ -29,4 +30,9 @@ type
     startContainer*: proc (service: string) {.closure.}
     stopContainer*: proc (service: string) {.closure.}
     removeContainer*: proc (service: string) {.closure.}
-    execHealthProbe*: proc (service: string, test: seq[string]): ProbeResult {.closure.}
+    execHealthProbe*: proc (service: string, test: seq[string], timeout: Duration): ProbeResult {.closure.}
+      ## `timeout` is the healthcheck's per-probe deadline (Compose
+      ## `healthcheck.timeout`) — an adapter that can hang (a real backend
+      ## waiting on the probed process to exit) must enforce it and report a
+      ## timeout as a nonzero `ProbeResult.exitCode`, never let the call
+      ## block past it.

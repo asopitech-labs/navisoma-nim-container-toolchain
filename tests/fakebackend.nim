@@ -8,7 +8,7 @@
 ## one `FakeBackend` instance, and every probe outcome is pre-scripted
 ## by the test that builds it.
 
-import std/tables
+import std/[tables, times]
 import navisoma/types
 import navisoma/backend
 import navisoma/errors
@@ -72,7 +72,7 @@ proc port*(fb: FakeBackend): BackendPort =
   result.removeContainer = proc (service: string) =
     fb.calls.add Call(kind: ckRemoveContainer, arg: service)
 
-  result.execHealthProbe = proc (service: string, test: seq[string]): ProbeResult =
+  result.execHealthProbe = proc (service: string, test: seq[string], timeout: Duration): ProbeResult =
     fb.calls.add Call(kind: ckExecHealthProbe, arg: service)
     if fb.shouldFail(ckExecHealthProbe, service):
       raise newException(RuntimeError, "fake backend: execHealthProbe failed for " & service)

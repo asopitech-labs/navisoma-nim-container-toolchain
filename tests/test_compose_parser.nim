@@ -32,9 +32,80 @@ suite "restricted Compose parser":
     check db.image == "registry.example.com/db:14"
     check db.healthcheck.isSome
     check db.healthcheck.get().retries == 5
+    check db.healthcheck.get().test == @["pg_isready", "-U", "app"]
     let api = project.findService("api").get()
     check api.dependsOn.len == 1
     check api.dependsOn[0].service == "db"
+
+  test "strips the 'CMD' prefix rather than passing it through as an argument":
+    let source = """
+services:
+  db:
+    image: registry.example.com/db:1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+"""
+    let db = parseComposeProject(source).findService("db").get()
+    check db.healthcheck.get().test == @["curl", "-f", "http://localhost/health"]
+
+  test "rewrites 'CMD-SHELL' into a /bin/sh -c invocation":
+    let source = """
+services:
+  db:
+    image: registry.example.com/db:1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+"""
+    let db = parseComposeProject(source).findService("db").get()
+    check db.healthcheck.get().test == @["/bin/sh", "-c", "curl -f http://localhost/health || exit 1"]
+
+  test "rejects a bare test form without a 'CMD'/'CMD-SHELL' prefix":
+    let source = """
+services:
+  db:
+    image: registry.example.com/db:1
+    healthcheck:
+      test: ["true"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+"""
+    expect SchemaError:
+      discard parseComposeProject(source)
+
+  test "rejects 'NONE' as an unsupported test form":
+    let source = """
+services:
+  db:
+    image: registry.example.com/db:1
+    healthcheck:
+      test: ["NONE"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+"""
+    expect SchemaError:
+      discard parseComposeProject(source)
+
+  test "rejects 'CMD-SHELL' with more than one argument":
+    let source = """
+services:
+  db:
+    image: registry.example.com/db:1
+    healthcheck:
+      test: ["CMD-SHELL", "curl", "-f"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+"""
+    expect SchemaError:
+      discard parseComposeProject(source)
 
   test "rejects a key outside the fixed MVP boundary (networks:)":
     let source = """

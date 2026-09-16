@@ -3,7 +3,7 @@ services:
     image: docker.io/library/busybox:latest
     command: ["sleep", "3600"]
     healthcheck:
-      test: ["false"]
+      test: ["CMD", "false"]
       interval: 1s
       timeout: 5s
       retries: 2

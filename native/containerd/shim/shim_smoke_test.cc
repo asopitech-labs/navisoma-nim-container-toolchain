@@ -64,7 +64,7 @@ int main() {
 
   const char* okTest[] = {"echo", "hello"};
   size_t okTestLens[] = {4, 5};
-  auto* r4 = nvsm_containerd_exec_health_probe(client, svc.c_str(), svc.size(), okTest, okTestLens, 2);
+  auto* r4 = nvsm_containerd_exec_health_probe(client, svc.c_str(), svc.size(), okTest, okTestLens, 2, 5000);
   if (nvsm_containerd_result_ok(r4) && nvsm_containerd_result_exit_code(r4) == 0) {
     std::printf("OK   exec_health_probe(echo) exit=0\n");
   } else {
@@ -79,7 +79,7 @@ int main() {
 
   const char* failTest[] = {"false"};
   size_t failTestLens[] = {5};
-  auto* r5 = nvsm_containerd_exec_health_probe(client, svc.c_str(), svc.size(), failTest, failTestLens, 1);
+  auto* r5 = nvsm_containerd_exec_health_probe(client, svc.c_str(), svc.size(), failTest, failTestLens, 1, 5000);
   if (nvsm_containerd_result_ok(r5) && nvsm_containerd_result_exit_code(r5) == 1) {
     std::printf("OK   exec_health_probe(false) exit=1\n");
   } else {
@@ -91,6 +91,24 @@ int main() {
     failures++;
   }
   nvsm_containerd_result_release(r5);
+
+  // A probe that outlives its deadline must be reported as a failed probe (exit 124), not left
+  // to hang the call or surface as a backend error — this is exec_health_probe's own deadline
+  // enforcement, independent of the Nim executor's pacing (which the integration test exercises).
+  const char* hangTest[] = {"sleep", "30"};
+  size_t hangTestLens[] = {5, 2};
+  auto* r5b = nvsm_containerd_exec_health_probe(client, svc.c_str(), svc.size(), hangTest, hangTestLens, 2, 1000);
+  if (nvsm_containerd_result_ok(r5b) && nvsm_containerd_result_exit_code(r5b) == 124) {
+    std::printf("OK   exec_health_probe(sleep 30, timeout 1s) exit=124\n");
+  } else {
+    size_t len = 0;
+    const char* msg = nvsm_containerd_result_error_message(r5b, &len);
+    std::fprintf(stderr, "FAIL exec_health_probe(sleep 30, timeout 1s): ok=%d exit=%d msg=%.*s\n",
+                 nvsm_containerd_result_ok(r5b), nvsm_containerd_result_exit_code(r5b),
+                 static_cast<int>(len), msg);
+    failures++;
+  }
+  nvsm_containerd_result_release(r5b);
 
   auto* r6 = nvsm_containerd_stop_container(client, svc.c_str(), svc.size());
   check(r6, "stop_container");

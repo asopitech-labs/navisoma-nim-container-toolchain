@@ -3,10 +3,12 @@ services:
     image: docker.io/library/busybox:latest
     command: ["sleep", "3600"]
     healthcheck:
-      test: ["CMD", "true"]
+      # A probe that never exits on its own must still count as a failed attempt, not hang `up`
+      # forever — this fixture exists to prove exec_health_probe's deadline actually fires.
+      test: ["CMD", "sleep", "999999"]
       interval: 1s
-      timeout: 5s
-      retries: 3
+      timeout: 1s
+      retries: 2
       start_period: 0s
   api:
     image: docker.io/library/busybox:latest

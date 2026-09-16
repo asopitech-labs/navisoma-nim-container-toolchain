@@ -79,9 +79,15 @@ supported via `CONTAINER_ENGINE=docker`).
   leaves stdout/stderr disconnected, and a process that writes to a disconnected fd can itself
   exit non-zero (observed: busybox `echo` exited 1 with empty stdio, `false` — which writes
   nothing — exited correctly). Both requests redirect to `/dev/null` explicitly.
-- **`execHealthProbe` has no environment of its own** — `BackendPort`'s interface
-  (`src/navisoma/backend.nim`) only carries a command, by design. The shim gives probes a
-  standard `PATH` so bare executable names resolve at all.
+- **`execHealthProbe` reuses the container's own env and numeric uid/gid**, cached by the shim
+  at `create_container` time (`nvsm_container_runtime_info`) and looked up by container id at
+  probe time — `BackendPort`'s interface (`src/navisoma/backend.nim`) never carries environment
+  itself, so this state has to live on the native side of the boundary. Falls back to a bare
+  `PATH` only if that lookup somehow misses.
+- **The image's `User` config is honored, numeric forms only** (`"1000"` or `"1000:1000"`) — a
+  named user/group would require reading `/etc/passwd`/`/etc/group` out of the image's rootfs,
+  which this shim does not do; such an image is rejected explicitly (`create_container` fails)
+  rather than silently running as root.
 
 ## Verifying this still works
 

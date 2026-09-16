@@ -79,24 +79,29 @@ proc createContainer*(c: ContainerdClient, serviceName, resolvedImageId: string,
     asArray(envKeysC), asArray(envKeyLens),
     asArray(envValuesC), asArray(envValueLens), env.len.csize_t)
   checkResult(r, "create_container(" & serviceName & ")")
+  nvsmContainerdResultRelease(r)
 
 proc startContainer*(c: ContainerdClient, serviceName: string) =
-  checkResult(nvsmContainerdStartContainer(c.raw, serviceName.cstring, serviceName.len.csize_t),
-              "start_container(" & serviceName & ")")
+  let r = nvsmContainerdStartContainer(c.raw, serviceName.cstring, serviceName.len.csize_t)
+  checkResult(r, "start_container(" & serviceName & ")")
+  nvsmContainerdResultRelease(r)
 
-proc execHealthProbe*(c: ContainerdClient, serviceName: string, test: seq[string]): int =
+proc execHealthProbe*(c: ContainerdClient, serviceName: string, test: seq[string], timeoutMs: int64): int =
   let (testC, testLens) = toCStringArray(test)
   let r = nvsmContainerdExecHealthProbe(
     c.raw, serviceName.cstring, serviceName.len.csize_t,
-    asArray(testC), asArray(testLens), test.len.csize_t)
+    asArray(testC), asArray(testLens), test.len.csize_t,
+    timeoutMs.clonglong)
   checkResult(r, "exec_health_probe(" & serviceName & ")")
   result = nvsmContainerdResultExitCode(r).int
   nvsmContainerdResultRelease(r)
 
 proc stopContainer*(c: ContainerdClient, serviceName: string) =
-  checkResult(nvsmContainerdStopContainer(c.raw, serviceName.cstring, serviceName.len.csize_t),
-              "stop_container(" & serviceName & ")")
+  let r = nvsmContainerdStopContainer(c.raw, serviceName.cstring, serviceName.len.csize_t)
+  checkResult(r, "stop_container(" & serviceName & ")")
+  nvsmContainerdResultRelease(r)
 
 proc removeContainer*(c: ContainerdClient, serviceName: string) =
-  checkResult(nvsmContainerdRemoveContainer(c.raw, serviceName.cstring, serviceName.len.csize_t),
-              "remove_container(" & serviceName & ")")
+  let r = nvsmContainerdRemoveContainer(c.raw, serviceName.cstring, serviceName.len.csize_t)
+  checkResult(r, "remove_container(" & serviceName & ")")
+  nvsmContainerdResultRelease(r)

@@ -1,0 +1,4 @@
+services:
+  db:
+    image: docker.io/library/busybox:latest
+    command: ["sleep", "3600"]

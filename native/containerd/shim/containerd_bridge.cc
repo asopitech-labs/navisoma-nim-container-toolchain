@@ -36,12 +36,15 @@
 #include "types/mount.pb.h"
 #include "types/platform.pb.h"
 
+#include <cctype>
+#include <chrono>
 #include <cstring>
 #include <iomanip>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 using json = nlohmann::json;
@@ -88,13 +91,23 @@ constexpr const char* kSpecTypeUrl = "types.containerd.io/opencontainers/runtime
 constexpr const char* kProcessTypeUrl = "types.containerd.io/opencontainers/runtime-spec/1/Process";
 constexpr const char* kPlatformOS = "linux";
 constexpr const char* kPlatformArch = "amd64";
-// backend.nim's execHealthProbe takes only a command, no environment (BackendPort is a fixed,
-// narrow interface — see its own doc comment) — a health probe has no access to the container's
-// actual configured env, so it needs a standard PATH of its own to resolve bare executable
-// names like "curl" or "echo" at all.
+// Fallback PATH for a health probe when, for whatever reason, no cached container env is found
+// (should not happen in practice — every probe follows a successful create_container — but a
+// probe must never crash or hang for want of a PATH to resolve bare executable names like
+// "curl" against).
 constexpr const char* kDefaultPathEnv = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 } // namespace
+
+// The env and numeric uid/gid a container was actually created with (see create_container's
+// mergeEnv/parseNumericUser) — cached so exec_health_probe can run the health command with the
+// same environment and identity as the container's own process instead of a bare, root-owned
+// shell. Populated on a successful create_container, erased on remove_container.
+struct nvsm_container_runtime_info {
+  std::vector<std::string> env;
+  uint32_t uid = 0;
+  uint32_t gid = 0;
+};
 
 struct nvsm_containerd_client {
   std::string ns;
@@ -106,6 +119,7 @@ struct nvsm_containerd_client {
   std::unique_ptr<Tasks::Stub> tasks;
   std::unique_ptr<Snapshots::Stub> snapshots;
   int execCounter = 0;
+  std::unordered_map<std::string, nvsm_container_runtime_info> containerInfo;
 };
 
 struct nvsm_containerd_result {
@@ -234,10 +248,10 @@ ImageRootfs resolveImageRootfs(nvsm_containerd_client* client, const std::string
 // `Spec` (containerd decodes these as JSON per the typeurl registration noted above, not as
 // protobuf — do not protobuf-serialize this).
 json buildProcessJson(const std::vector<std::string>& args, const std::vector<std::string>& env,
-                      const std::string& cwd) {
+                      const std::string& cwd, uint32_t uid, uint32_t gid) {
   json p;
   p["terminal"] = false;
-  p["user"] = {{"uid", 0}, {"gid", 0}};
+  p["user"] = {{"uid", uid}, {"gid", gid}};
   p["args"] = args;
   p["env"] = env;
   p["cwd"] = cwd.empty() ? "/" : cwd;
@@ -246,11 +260,12 @@ json buildProcessJson(const std::vector<std::string>& args, const std::vector<st
 }
 
 json buildSpecJson(const std::string& hostname, const std::vector<std::string>& args,
-                    const std::vector<std::string>& env, const std::string& cwd) {
+                    const std::vector<std::string>& env, const std::string& cwd,
+                    uint32_t uid, uint32_t gid) {
   json spec;
   spec["ociVersion"] = "1.0.2";
   spec["hostname"] = hostname;
-  spec["process"] = buildProcessJson(args, env, cwd);
+  spec["process"] = buildProcessJson(args, env, cwd, uid, gid);
   spec["root"] = {{"path", "rootfs"}, {"readonly", false}};
   spec["mounts"] = json::array({
       json{{"destination", "/proc"}, {"type", "proc"}, {"source", "proc"}},
@@ -297,6 +312,29 @@ std::vector<std::string> mergeEnv(const json& imageConfig,
     result.push_back(kv.first + "=" + kv.second);
   }
   return result;
+}
+
+// Parses the OCI image config's `User` field, which this shim supports only in its numeric
+// forms ("1000" or "1000:1000") — an empty value correctly defaults to root (uid/gid 0), matching
+// an image that never set USER. A *named* user/group (e.g. "app" or "app:app") would require
+// reading /etc/passwd or /etc/group out of the image's rootfs, which this narrow shim does not
+// do; such an image is rejected explicitly rather than silently falling back to root, since
+// silently running a non-root-intended image as root is a worse outcome than failing loudly.
+bool parseNumericUser(const std::string& raw, uint32_t& uid, uint32_t& gid) {
+  uid = 0;
+  gid = 0;
+  if (raw.empty()) return true;
+  auto colon = raw.find(':');
+  std::string uidPart = colon == std::string::npos ? raw : raw.substr(0, colon);
+  std::string gidPart = colon == std::string::npos ? std::string() : raw.substr(colon + 1);
+  if (uidPart.empty()) return false;
+  for (unsigned char c : uidPart) if (!std::isdigit(c)) return false;
+  uid = static_cast<uint32_t>(std::stoul(uidPart));
+  if (!gidPart.empty()) {
+    for (unsigned char c : gidPart) if (!std::isdigit(c)) return false;
+    gid = static_cast<uint32_t>(std::stoul(gidPart));
+  }
+  return true;
 }
 
 } // namespace
@@ -466,6 +504,13 @@ nvsm_containerd_result* nvsm_containerd_create_container(
 
     ImageRootfs rootfs = resolveImageRootfs(client, imageRef);
 
+    uint32_t uid, gid;
+    std::string userSpec = rootfs.config.value("User", "");
+    if (!parseNumericUser(userSpec, uid, gid)) {
+      return failResult("image user '" + userSpec + "' is not a numeric uid[:gid] — named-user "
+                         "images are not supported by this MVP boundary");
+    }
+
     PrepareSnapshotRequest prepReq;
     prepReq.set_snapshotter(kSnapshotter);
     prepReq.set_key(id);
@@ -477,13 +522,27 @@ nvsm_containerd_result* nvsm_containerd_create_container(
       return failResult("snapshots.prepare: " + status.error_message());
     }
 
+    // From here on, any failure must undo the snapshot (and, once created, the container record)
+    // this call already made — otherwise a partially-created container is left behind under `id`
+    // and the next `up` for the same service fails with "already exists" instead of retrying
+    // cleanly.
+    auto rollbackSnapshot = [&]() {
+      RemoveSnapshotRequest req;
+      req.set_snapshotter(kSnapshotter);
+      req.set_key(id);
+      auto ctx = newCtx(client);
+      google::protobuf::Empty resp;
+      client->snapshots->Remove(ctx.get(), req, &resp); // best-effort
+    };
+
     std::vector<std::string> args = mergeArgs(rootfs.config, cmd);
     if (args.empty()) {
+      rollbackSnapshot();
       return failResult("service '" + id + "' has no command and the image has no default CMD/ENTRYPOINT");
     }
     std::vector<std::string> envStrings = mergeEnv(rootfs.config, env);
     std::string cwd = rootfs.config.value("WorkingDir", "");
-    json specJson = buildSpecJson(id, args, envStrings, cwd);
+    json specJson = buildSpecJson(id, args, envStrings, cwd, uid, gid);
     std::string specBytes = specJson.dump();
 
     Container container;
@@ -501,6 +560,7 @@ nvsm_containerd_result* nvsm_containerd_create_container(
     containerd::services::containers::v1::CreateContainerResponse createResp;
     status = client->containers->Create(ctx2.get(), createReq, &createResp);
     if (!status.ok()) {
+      rollbackSnapshot();
       return failResult("containers.create: " + status.error_message());
     }
 
@@ -519,9 +579,16 @@ nvsm_containerd_result* nvsm_containerd_create_container(
     containerd::services::tasks::v1::CreateTaskResponse taskResp;
     status = client->tasks->Create(ctx3.get(), taskReq, &taskResp);
     if (!status.ok()) {
+      DeleteContainerRequest delReq;
+      delReq.set_id(id);
+      auto delCtx = newCtx(client);
+      google::protobuf::Empty delResp;
+      client->containers->Delete(delCtx.get(), delReq, &delResp); // best-effort
+      rollbackSnapshot();
       return failResult("tasks.create: " + status.error_message());
     }
 
+    client->containerInfo[id] = nvsm_container_runtime_info{envStrings, uid, gid};
     return okResult();
   } catch (const std::exception& e) {
     return failResult(e.what());
@@ -548,14 +615,23 @@ nvsm_containerd_result* nvsm_containerd_start_container(nvsm_containerd_client* 
 nvsm_containerd_result* nvsm_containerd_exec_health_probe(
     nvsm_containerd_client* client,
     const char* service_name, size_t service_name_len,
-    const char* const* test, const size_t* test_lens, size_t test_len) {
+    const char* const* test, const size_t* test_lens, size_t test_len,
+    long long timeout_ms) {
   try {
     std::string id(service_name, service_name_len);
     std::vector<std::string> args;
     for (size_t i = 0; i < test_len; i++) args.emplace_back(test[i], test_lens[i]);
 
     std::string execId = "probe-" + std::to_string(++client->execCounter);
-    json processJson = buildProcessJson(args, {kDefaultPathEnv}, "/");
+    // Run the probe with the same env and identity the container itself was created with (see
+    // create_container) — falls back to a bare PATH only if that lookup somehow misses, since a
+    // probe must never crash for want of an env.
+    auto infoIt = client->containerInfo.find(id);
+    std::vector<std::string> env = infoIt != client->containerInfo.end()
+        ? infoIt->second.env : std::vector<std::string>{kDefaultPathEnv};
+    uint32_t uid = infoIt != client->containerInfo.end() ? infoIt->second.uid : 0;
+    uint32_t gid = infoIt != client->containerInfo.end() ? infoIt->second.gid : 0;
+    json processJson = buildProcessJson(args, env, "/", uid, gid);
 
     ExecProcessRequest execReq;
     execReq.set_container_id(id);
@@ -582,13 +658,31 @@ nvsm_containerd_result* nvsm_containerd_exec_health_probe(
       return failResult("tasks.start(exec): " + status.error_message());
     }
 
+    // healthcheck.timeout bounds this Wait — a probe command that hangs must not hang `up`
+    // forever. A deadline here (rather than never waiting past it) is a probe *failure*, exactly
+    // like a nonzero exit, not a backend error: it must feed into health.nim's retry/start_period
+    // logic instead of aborting the whole invocation.
     WaitRequest waitReq;
     waitReq.set_container_id(id);
     waitReq.set_exec_id(execId);
     auto ctx3 = newCtx(client);
+    ctx3->set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms));
     WaitResponse waitResp;
     status = client->tasks->Wait(ctx3.get(), waitReq, &waitResp);
-    if (!status.ok()) {
+
+    int exitCode;
+    if (status.ok()) {
+      exitCode = static_cast<int>(waitResp.exit_status());
+    } else if (status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
+      exitCode = 124; // conventional "command timed out" exit code (matches GNU coreutils timeout(1))
+      KillRequest killReq;
+      killReq.set_container_id(id);
+      killReq.set_exec_id(execId);
+      killReq.set_signal(9);
+      auto killCtx = newCtx(client);
+      google::protobuf::Empty killResp;
+      client->tasks->Kill(killCtx.get(), killReq, &killResp); // best-effort
+    } else {
       return failResult("tasks.wait(exec): " + status.error_message());
     }
 
@@ -600,7 +694,7 @@ nvsm_containerd_result* nvsm_containerd_exec_health_probe(
     client->tasks->DeleteProcess(ctx4.get(), delReq, &delResp); // best-effort; exit code already captured
 
     auto* r = okResult();
-    r->exitCode = static_cast<int>(waitResp.exit_status());
+    r->exitCode = exitCode;
     return r;
   } catch (const std::exception& e) {
     return failResult(e.what());
@@ -671,6 +765,7 @@ nvsm_containerd_result* nvsm_containerd_remove_container(nvsm_containerd_client*
       return failResult("snapshots.remove: " + status.error_message());
     }
 
+    client->containerInfo.erase(id);
     return okResult();
   } catch (const std::exception& e) {
     return failResult(e.what());

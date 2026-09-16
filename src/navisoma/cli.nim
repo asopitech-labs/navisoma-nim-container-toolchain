@@ -18,7 +18,19 @@ import ./executor
 import ./backend
 
 when defined(navisomaContainerd):
+  import std/[os, sha1]
   import ./backends/containerd_backend
+
+  proc projectIdFor(composeFile: string): string =
+    ## A stable per-compose-file id, so `up` and `down` invoked against the same file (the only
+    ## thing the MVP CLI has to identify "a project" with — there is no persisted invocation
+    ## state) always agree on it, and two different compose files never agree on it. Used only to
+    ## namespace backend-native container/task ids (containerd_backend.nim) — never exposed above
+    ## the backend-adapter boundary.
+    let canonical =
+      try: expandFilename(composeFile)
+      except OSError: composeFile
+    ($secureHash(canonical))[0 ..< 12].toLowerAscii()
 
 type
   Backend* = enum
@@ -86,7 +98,7 @@ proc cmdUp(args: seq[string]): int =
     case backend
     of backendContainerd:
       when defined(navisomaContainerd):
-        let (port, client) = newContainerdPort()
+        let (port, client) = newContainerdPort(projectIdFor(parsed.file.get()))
         defer: client.close()
         discard runUp(project, port, newRealProbeClock())
         return 0
@@ -112,7 +124,7 @@ proc cmdDown(args: seq[string]): int =
     case backend
     of backendContainerd:
       when defined(navisomaContainerd):
-        let (port, client) = newContainerdPort()
+        let (port, client) = newContainerdPort(projectIdFor(parsed.file.get()))
         defer: client.close()
         # Deterministically reverse-order stop/remove exactly the services `up` would have
         # created for this fixture (planDown's own contract) — idempotent per service even if

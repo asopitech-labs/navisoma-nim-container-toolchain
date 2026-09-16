@@ -25,7 +25,10 @@ check() {
 }
 
 run_navisoma() {
-  "$CONTAINER_ENGINE" run --rm \
+  # `timeout` here is a hard ceiling on this whole suite ever hanging in CI — never a substitute
+  # for navisoma's own healthcheck.timeout enforcement, which the "timeout fixture" case below
+  # actually exercises (and expects to finish in well under this ceiling).
+  timeout 60 "$CONTAINER_ENGINE" run --rm \
     -v "$ROOT:/workspace:Z" \
     -v "$CD_DIR/.dev-run:/run/containerd:Z" \
     navisoma-containerd-build "$BIN" "$@" 2>&1
@@ -33,6 +36,19 @@ run_navisoma() {
 
 ctr_ns() {
   "$CONTAINER_ENGINE" exec nvsm-containerd-dev ctr -n navisoma "$@"
+}
+
+# Container/task ids are namespaced per compose-file invocation (nvsm-<projectId>-<service> —
+# see cli.nim's projectIdFor and containerd_backend.nim's newContainerdPort), so assertions here
+# match on the "-<service> RUNNING" suffix instead of an exact bare-name id.
+check_running() {
+  local desc="$1"; shift
+  local running
+  running=$(ctr_ns tasks list | awk 'NR>1 {print $1, $3}')
+  check "$desc: task count" "$(echo "$running" | grep -c .)" "$#"
+  for svc in "$@"; do
+    check "$desc: $svc running" "$(echo "$running" | grep -c -- "-${svc} RUNNING\$")" "1"
+  done
 }
 
 "$CD_DIR/dev-daemon.sh" up
@@ -51,9 +67,7 @@ run_navisoma up --backend containerd "tests/integration/containerd/healthy.compo
 upExit=$?
 set -e
 check "healthy up exit code" "$upExit" "0"
-
-running=$(ctr_ns tasks list | awk 'NR>1 {print $1, $3}' | sort)
-check "healthy up: db and api both running" "$running" "$(printf 'api RUNNING\ndb RUNNING')"
+check_running "healthy up" api db
 
 echo "=== healthy fixture: down ==="
 set +e
@@ -72,6 +86,42 @@ set -e
 check "unhealthy up exit code" "$upExit" "1"
 check "unhealthy up: db never started api" "$(echo "$upOutput" | grep -c 'unhealthy')" "1"
 check "unhealthy up: nothing left running (reverse cleanup)" "$(ctr_ns containers list | wc -l)" "1"
+
+echo "=== env fixture: healthcheck sees the service's own environment ==="
+set +e
+run_navisoma up --backend containerd "tests/integration/containerd/env.compose.yaml"
+upExit=$?
+set -e
+check "env up exit code" "$upExit" "0"
+check_running "env up" api db
+run_navisoma down --backend containerd "tests/integration/containerd/env.compose.yaml" >/dev/null
+check "env down: no containers left" "$(ctr_ns containers list | wc -l)" "1"
+
+echo "=== timeout fixture: a probe that outlives healthcheck.timeout fails instead of hanging ==="
+set +e
+start=$(date +%s)
+upOutput=$(run_navisoma up --backend containerd "tests/integration/containerd/timeout.compose.yaml")
+upExit=$?
+elapsed=$(( $(date +%s) - start ))
+set -e
+check "timeout up exit code" "$upExit" "1"
+check "timeout up: db never started api" "$(echo "$upOutput" | grep -c 'unhealthy')" "1"
+if [[ "$elapsed" -gt 30 ]]; then
+  echo "FAIL timeout up: took ${elapsed}s — exec_health_probe did not enforce its deadline" >&2
+  failures=$((failures + 1))
+else
+  echo "OK   timeout up: finished in ${elapsed}s (bounded by healthcheck.timeout, not the probe's own runtime of ~999999s)"
+fi
+check "timeout up: nothing left running (reverse cleanup)" "$(ctr_ns containers list | wc -l)" "1"
+
+echo "=== collision fixtures: two different projects using the same service name never collide ==="
+run_navisoma up --backend containerd "tests/integration/containerd/collision-a/compose.yaml" >/dev/null
+run_navisoma up --backend containerd "tests/integration/containerd/collision-b/compose.yaml" >/dev/null
+check "collision: both projects' containers coexist" "$(ctr_ns containers list | wc -l)" "3"
+run_navisoma down --backend containerd "tests/integration/containerd/collision-a/compose.yaml" >/dev/null
+check "collision: down(a) leaves b's container running" "$(ctr_ns containers list | wc -l)" "2"
+run_navisoma down --backend containerd "tests/integration/containerd/collision-b/compose.yaml" >/dev/null
+check "collision: down(b) leaves nothing running" "$(ctr_ns containers list | wc -l)" "1"
 
 echo ""
 if [[ "$failures" -eq 0 ]]; then

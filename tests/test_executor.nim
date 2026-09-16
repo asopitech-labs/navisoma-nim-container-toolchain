@@ -19,7 +19,7 @@ proc svc(name: string, healthcheck = false, dependsOn: seq[string] = @[]): Servi
   for dep in dependsOn:
     result.dependsOn.add DependsOnEdge(service: dep, condition: conditionServiceHealthy)
 
-proc pastStartPeriodClock(attempt: int): Duration = initDuration(seconds = 100)
+proc pastStartPeriodClock(attempt: int, interval: Duration): Duration = initDuration(seconds = 100)
 
 suite "executor":
   test "healthy: db is created/started, health probed, then api is created/started":
@@ -94,3 +94,15 @@ suite "executor":
     check fb.calls.filterIt(it.kind == ckStopContainer) == @[Call(kind: ckStopContainer, arg: "db")]
     check fb.calls.filterIt(it.kind == ckRemoveContainer) == @[Call(kind: ckRemoveContainer, arg: "db")]
     check not fb.calls.anyIt(it.arg == "api" and it.kind in {ckStopContainer, ckRemoveContainer})
+
+suite "newRealProbeClock":
+  test "attempt 0 fires immediately (no sleep), later attempts actually wait `interval`":
+    let clock = newRealProbeClock()
+    let interval = initDuration(milliseconds = 50)
+    let before = getTime()
+    let elapsed0 = clock(0, interval)
+    check elapsed0 < initDuration(milliseconds = 20)
+    let elapsed1 = clock(1, interval)
+    let wallElapsed = getTime() - before
+    check elapsed1 >= interval
+    check wallElapsed >= interval

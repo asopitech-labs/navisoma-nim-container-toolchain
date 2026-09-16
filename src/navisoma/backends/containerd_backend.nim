@@ -8,6 +8,7 @@
 when not defined(navisomaContainerd):
   {.error: "src/navisoma/backends/containerd_backend.nim must only be imported under -d:navisomaContainerd".}
 
+import std/times
 import ../backend
 import ../types
 import ../../bindings/containerd_client
@@ -23,28 +24,36 @@ const
     ## explicit namespace-creation call is needed: containerd namespaces are created implicitly
     ## on first write (verified against the pinned daemon during development).
 
-proc newContainerdPort*(socketPath: string = DefaultSocketPath,
+proc newContainerdPort*(projectId: string,
+                         socketPath: string = DefaultSocketPath,
                          containerdNamespace: string = DefaultNamespace
                         ): tuple[port: BackendPort, client: ContainerdClient] =
+  ## `projectId` (see cli.nim's `projectIdFor`, derived from the compose file's own path)
+  ## namespaces every container/task/snapshot id as `nvsm-<projectId>-<service>` instead of the
+  ## bare service name: two different Compose files that both happen to declare a service named
+  ## e.g. "db" must never collide on the same containerd namespace's ids, since `up`/`down` on
+  ## one must never touch the other's resources.
   let client = connect(socketPath, containerdNamespace)
+
+  proc containerId(service: string): string = "nvsm-" & projectId & "-" & service
 
   var port: BackendPort
   port.resolveImage = proc (image: string): ResolvedImage =
     ResolvedImage(id: client.resolveImage(image))
 
   port.createContainer = proc (service: ServiceSpec, image: ResolvedImage) =
-    client.createContainer(service.name, image.id, service.command, service.environment)
+    client.createContainer(containerId(service.name), image.id, service.command, service.environment)
 
   port.startContainer = proc (service: string) =
-    client.startContainer(service)
+    client.startContainer(containerId(service))
 
   port.stopContainer = proc (service: string) =
-    client.stopContainer(service)
+    client.stopContainer(containerId(service))
 
   port.removeContainer = proc (service: string) =
-    client.removeContainer(service)
+    client.removeContainer(containerId(service))
 
-  port.execHealthProbe = proc (service: string, test: seq[string]): ProbeResult =
-    ProbeResult(exitCode: client.execHealthProbe(service, test))
+  port.execHealthProbe = proc (service: string, test: seq[string], timeout: Duration): ProbeResult =
+    ProbeResult(exitCode: client.execHealthProbe(containerId(service), test, timeout.inMilliseconds.int64))
 
   (port, client)

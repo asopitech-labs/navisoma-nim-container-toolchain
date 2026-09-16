@@ -95,9 +95,26 @@ proc parseHealthcheck(node: YamlNode, context: string): HealthCheckSpec =
   discard requireSequence(testNode, context & ".test")
   if testNode.len == 0:
     fail(context & ".test must not be empty")
-  result.test = @[]
+  var rawTest: seq[string] = @[]
   for elem in testNode.elems:
-    result.test.add requireScalar(elem, context & ".test element")
+    rawTest.add requireScalar(elem, context & ".test element")
+  # Compose Specification `healthcheck.test` form: the first element selects how the rest is
+  # run — `CMD` (exec argv) or `CMD-SHELL` (one shell command string via `/bin/sh -c`). This
+  # MVP boundary supports exactly those two forms; `NONE` and the bare-string shorthand are not
+  # part of the fixed MVP boundary (#18) and are rejected here rather than silently executed as
+  # a literal command (which would try to exec e.g. a binary literally named "CMD").
+  case rawTest[0]
+  of "CMD":
+    if rawTest.len < 2:
+      fail(context & ".test: 'CMD' must be followed by a command")
+    result.test = rawTest[1 .. ^1]
+  of "CMD-SHELL":
+    if rawTest.len != 2:
+      fail(context & ".test: 'CMD-SHELL' must be followed by exactly one shell command string")
+    result.test = @["/bin/sh", "-c", rawTest[1]]
+  else:
+    fail(context & ".test: first element must be 'CMD' or 'CMD-SHELL', got '" & rawTest[0] &
+      "' (this MVP boundary does not support the bare or 'NONE' test forms)")
   if node.hasKey("interval"):
     result.interval = parseDuration(requireScalar(node["interval"], context & ".interval"), context & ".interval")
   if node.hasKey("timeout"):

@@ -104,7 +104,8 @@ proc nvsmContainerdStartContainer*(client: NvsmContainerdClientPtr,
 proc nvsmContainerdExecHealthProbe*(
     client: NvsmContainerdClientPtr,
     serviceName: cstring, serviceNameLen: csize_t,
-    test: ptr UncheckedArray[cstring], testLens: ptr UncheckedArray[csize_t], testLen: csize_t
+    test: ptr UncheckedArray[cstring], testLens: ptr UncheckedArray[csize_t], testLen: csize_t,
+    timeoutMs: clonglong
   ): NvsmContainerdResultPtr
   {.importc: "nvsm_containerd_exec_health_probe", header: "containerd_bridge.h".}
 
