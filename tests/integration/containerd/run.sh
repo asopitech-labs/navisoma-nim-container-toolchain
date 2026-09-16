@@ -62,13 +62,13 @@ trap cleanup EXIT
   navisoma-containerd-build bash -c \
   "cd /workspace && nim c --path:src -d:navisomaContainerd -o:native/containerd/.dev-run/navisoma-cd src/navisoma.nim"
 
-# Pulls the one image every fixture uses into the content store ahead of time, with its own
+# Pulls and unpacks the one image every fixture uses into the native snapshotter ahead of time, with its own
 # generous ceiling separate from run_navisoma's 180s — a slow/cold registry pull is real-world
 # network variance that has nothing to do with any fixture's own correctness, and must never be
 # what makes the *first* fixture's timing-sensitive assertions flaky. Every navisoma resolve_image
-# call after this finds the content already present and only does the (fast, local) unpack.
+# call after this finds both content and the native snapshot already present.
 echo "=== warming image cache (network-bound; not part of any fixture's own timing) ==="
-timeout 280 "$CONTAINER_ENGINE" exec nvsm-containerd-dev ctr -n navisoma images pull docker.io/library/busybox:latest >/dev/null
+timeout 280 "$CONTAINER_ENGINE" exec nvsm-containerd-dev ctr -n navisoma images pull --snapshotter native docker.io/library/busybox:latest >/dev/null
 
 echo "=== healthy fixture: up ==="
 set +e

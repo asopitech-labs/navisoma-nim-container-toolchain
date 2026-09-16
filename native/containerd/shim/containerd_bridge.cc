@@ -121,7 +121,11 @@ namespace {
 class ScopeGuard {
 public:
   explicit ScopeGuard(std::function<void()> fn) : fn_(std::move(fn)) {}
-  ~ScopeGuard() { if (armed_ && fn_) fn_(); }
+  ~ScopeGuard() noexcept {
+    if (armed_ && fn_) {
+      try { fn_(); } catch (...) {} // Cleanup is best-effort and must not terminate the C ABI.
+    }
+  }
   void dismiss() { armed_ = false; }
   ScopeGuard(const ScopeGuard&) = delete;
   ScopeGuard& operator=(const ScopeGuard&) = delete;
@@ -640,6 +644,17 @@ nvsm_containerd_result* nvsm_containerd_create_container(
     for (const auto& m : prepResp.mounts()) {
       *taskReq.add_rootfs() = m;
     }
+    // A create RPC can succeed before a later local operation (such as caching runtime info)
+    // throws. Delete the task first during rollback: containerd refuses to delete its container
+    // while that task remains, which would otherwise also strand the snapshot.
+    ScopeGuard taskGuard([&]() {
+      client->containerInfo.erase(id);
+      DeleteTaskRequest delReq;
+      delReq.set_container_id(id);
+      auto delCtx = newCtx(client);
+      containerd::services::tasks::v1::DeleteResponse delResp;
+      client->tasks->Delete(delCtx.get(), delReq, &delResp); // best-effort, including not found
+    });
     auto ctx3 = newCtx(client);
     containerd::services::tasks::v1::CreateTaskResponse taskResp;
     status = client->tasks->Create(ctx3.get(), taskReq, &taskResp);
@@ -648,9 +663,14 @@ nvsm_containerd_result* nvsm_containerd_create_container(
     }
 
     client->containerInfo[id] = nvsm_container_runtime_info{envStrings, cwd, uid, gid};
+    // Allocate the success result while the guards are still armed: allocation failure must roll
+    // back the newly created task/container/snapshot instead of leaving a successful native
+    // create behind while this C ABI reports failure.
+    auto* result = okResult();
+    taskGuard.dismiss();
     containerGuard.dismiss();
     snapshotGuard.dismiss();
-    return okResult();
+    return result;
   } catch (const std::exception& e) {
     return failResult(e.what());
   }

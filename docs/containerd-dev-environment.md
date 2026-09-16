@@ -101,11 +101,14 @@ supported via `CONTAINER_ENGINE=docker`).
   a partially-created snapshot/container must be undone on a C++ exception thrown after it was
   created (e.g. a `json`/protobuf call), not only on the `if (!status.ok())` paths that were the
   only cases handled before.
-- **The integration suite explicitly warms the image cache before any timed fixture.** A cold
+- **The integration suite explicitly pulls and unpacks the image with `--snapshotter native` before any timed fixture.** A cold
   registry pull's latency is real-world network variance, not anything navisoma's own code
   controls — observed to occasionally exceed even a generous per-invocation ceiling in this dev
-  environment. Pulling once upfront (content only, no `--unpack`) keeps that variance out of every
-  fixture's own correctness assertions.
+  environment. Pulling and unpacking once into the same native snapshotter keeps that variance out
+  of every fixture's own correctness assertions. The explicit snapshotter is required in the nested
+  rootless-Podman daemon: its default overlayfs snapshotter cannot be used there.
+- **Review closeout (Phase 3):** cleanup now includes an armed task guard before `Tasks.Create`,
+  so an exception after task creation removes task → container → snapshot in dependency order.
 
 ## Verifying this still works
 
