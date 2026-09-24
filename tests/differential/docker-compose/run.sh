@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Docker Compose is the behavioral oracle for #18's fixed health-gated subset.
+# Docker Compose v2+ is the behavioral oracle for #18's fixed health-gated subset.
 # NAVISOMA's matching behavior is covered by tests/test_executor.nim and the
 # real containerd/WSLC scenarios; this script proves the oracle independently.
 set -euo pipefail
@@ -11,16 +11,16 @@ HEALTHY_PROJECT="navisoma-diff-healthy-$$"
 UNHEALTHY_PROJECT="navisoma-diff-unhealthy-$$"
 
 version="$(docker compose version 2>&1)" || {
-  echo "SKIP: Docker Compose v2 is unavailable" >&2
+  echo "SKIP: Docker Compose v2+ is unavailable" >&2
   exit 77
 }
-if [[ "$version" != Docker\ Compose\ version\ v2.* ]]; then
-  echo "SKIP: requires Docker Compose v2, got: $version" >&2
+if [[ "$version" != Docker\ Compose\ version\ v[2-9]* ]]; then
+  echo "SKIP: requires Docker Compose v2+, got: $version" >&2
   exit 77
 fi
 up_help="$(docker compose up --help)"
 if [[ "$up_help" != *--wait* ]]; then
-  echo "SKIP: Docker Compose v2 lacks 'up --wait'" >&2
+  echo "SKIP: Docker Compose v2+ lacks 'up --wait'" >&2
   exit 77
 fi
 
@@ -42,7 +42,12 @@ api_id="$(docker compose -p "$HEALTHY_PROJECT" -f "$HEALTHY" ps -q api)"
 }
 db_healthy_at="$(docker inspect -f '{{(index .State.Health.Log 0).End}}' "$db_id")"
 api_started_at="$(docker inspect -f '{{.State.StartedAt}}' "$api_id")"
-[[ "$api_started_at" > "$db_healthy_at" ]] || {
+db_healthy_time="${db_healthy_at%%+*}"
+db_healthy_time="${db_healthy_time%%Z}"
+db_healthy_time="${db_healthy_time/T/ }"
+api_started_time="${api_started_at%%+*}"
+api_started_time="${api_started_time%%Z}"
+[[ "$api_started_time" > "$db_healthy_time" ]] || {
   echo "FAIL: api started before db became healthy" >&2; exit 1;
 }
 

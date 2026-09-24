@@ -4,9 +4,9 @@
 
 This document is the user-facing boundary for Issue #18's fixed MVP. The same
 health-gated dependency workflow is verified against containerd and WSLC. The
-Docker Compose oracle scenario is committed but needs an official Docker
-Compose v2 host to produce its final evidence; Podman Compose is deliberately
-not accepted as that oracle.
+Docker Compose oracle ran with the official Docker Compose v5.5.1 CLI on
+2026-09-24 through Podman's Docker-compatible API. This is evidence for the
+Compose client's orchestration behavior, not Docker Engine conformance.
 
 ## Supported behavior
 
@@ -50,14 +50,16 @@ normal `nimble test` run to install a host-native toolchain.
 
 `tests/differential/docker-compose/run.sh` uses the same healthy and unhealthy
 fixtures as the containerd integration. It requires `docker compose version`
-to identify itself as Docker Compose v2, then proves:
+to identify itself as official Docker Compose v2 or newer, then proves:
 
 1. `api` starts after `db`'s first successful healthcheck.
 2. An unhealthy `db` makes `up --wait` fail and never leaves `api` running.
 3. Both temporary Compose projects are removed by the script's exit trap.
 
-The script exits 77 when Docker Compose v2 is unavailable. This is a skip, not
-a passing oracle result; do not substitute Podman Compose for this check.
+The script exits 77 when official Docker Compose v2+ is unavailable. This is a
+skip, not a passing oracle result; do not substitute Podman Compose for this
+check. The current evidence uses Compose v5.5.1 through Podman's
+Docker-compatible API; a Docker Engine run would add engine-level coverage.
 
 ## Verification order
 
@@ -68,5 +70,6 @@ tests/integration/wslc/run.sh
 tests/differential/docker-compose/run.sh
 ```
 
-The first three have current evidence. Run the final command on an official
-Docker Compose v2 host before closing Issue #18.
+All four have current evidence. The final command requires an official Docker
+Compose v2+ client; a Docker Engine host is additionally required only for
+engine-level coverage.

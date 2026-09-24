@@ -8,9 +8,9 @@ backend owns runtime calls and native handles.
 ## MVP status
 
 The fixed MVP is implemented and has real containerd and WSLC integration
-evidence. Docker Compose differential evidence remains runnable but unverified
-on a host with an official Docker Compose v2 installation; this checkout has
-Podman Compose only, which the oracle test intentionally rejects.
+evidence. The Docker Compose differential ran with official Docker Compose
+v5.5.1 through Podman's Docker-compatible API. This validates Compose-client
+orchestration, not Docker Engine conformance.
 
 ## Operations
 
@@ -42,7 +42,7 @@ conformance are intentionally unsupported.
 nimble test
 tests/integration/containerd/run.sh
 tests/integration/wslc/run.sh
-tests/differential/docker-compose/run.sh  # requires official Docker Compose v2
+tests/differential/docker-compose/run.sh  # requires official Docker Compose v2+
 ```
 
 The native integration scripts provision their toolchain in containers and
