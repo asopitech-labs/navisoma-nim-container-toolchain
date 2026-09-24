@@ -49,6 +49,18 @@ The native integration scripts provision their toolchain in containers and
 clean their test resources. See [MVP support and cleanup](docs/mvp-support.md)
 for backend prerequisites, ownership, and the exact oracle contract.
 
+GitHub Actions runs the unit/CLI test, Compose-script syntax check, and
+whitespace check for every push to `main` and pull request. It uses Nim 2.2.10
+and Nimble 0.22.2. Reproduce the CI checks locally with:
+
+```bash
+nimble test -Y
+bash -n tests/differential/docker-compose/run.sh
+git diff --check
+```
+
+The native integration scripts above remain separate local verification.
+
 ## Further reading
 
 - [containerd implementation record](docs/containerd-dev-environment.md)
