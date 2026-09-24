@@ -9,8 +9,10 @@ backend owns runtime calls and native handles.
 
 The fixed MVP is implemented and has real containerd and WSLC integration
 evidence. The Docker Compose differential ran with official Docker Compose
-v5.5.1 through Podman's Docker-compatible API. This validates Compose-client
-orchestration, not Docker Engine conformance.
+v5.5.1 through Podman's Docker-compatible API and with Docker Compose v2.33.0
+against Docker Engine v27.5.1 in a disposable Linux environment. The latter
+completed with no temporary Compose project left behind. This validates the
+oracle's Compose-client orchestration, not general Docker Engine conformance.
 
 ## Operations
 

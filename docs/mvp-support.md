@@ -4,9 +4,15 @@
 
 This document is the user-facing boundary for Issue #18's fixed MVP. The same
 health-gated dependency workflow is verified against containerd and WSLC. The
-Docker Compose oracle ran with the official Docker Compose v5.5.1 CLI on
-2026-09-24 through Podman's Docker-compatible API. This is evidence for the
-Compose client's orchestration behavior, not Docker Engine conformance.
+Docker Compose oracle has two recorded runs on 2026-09-24:
+
+- official Docker Compose v5.5.1 through Podman's Docker-compatible API;
+- Docker Compose v2.33.0 against Docker Engine v27.5.1 in disposable Linux
+  Docker-in-Docker.
+
+The Docker Engine run exited 0 with `OK: Docker Compose health-gate oracle`
+and left no Compose project behind. These runs are evidence for the oracle's
+Compose-client orchestration, not general Docker Engine conformance.
 
 ## Supported behavior
 
@@ -58,8 +64,12 @@ to identify itself as official Docker Compose v2 or newer, then proves:
 
 The script exits 77 when official Docker Compose v2+ is unavailable. This is a
 skip, not a passing oracle result; do not substitute Podman Compose for this
-check. The current evidence uses Compose v5.5.1 through Podman's
-Docker-compatible API; a Docker Engine run would add engine-level coverage.
+check. The recorded Docker Engine run used Compose v2.33.0 and Engine v27.5.1
+in a disposable Docker-in-Docker daemon. Its healthy project started `api`
+after `db` became healthy; its unhealthy project failed `up --wait` without
+starting `api`. After the script, `docker compose ls -q` was empty, so neither
+project left containers or networks in the initially empty daemon. The outer
+daemon and its Podman network were removed by the test harness.
 
 ## Verification order
 
