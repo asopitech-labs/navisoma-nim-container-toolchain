@@ -18,7 +18,7 @@ jobs:
         run: |
           nim --version
           nimble --version
-          nim --version | grep -Fqx 'Nim Compiler Version 2.2.10'
+          nim --version | grep -Eq '^Nim Compiler Version 2\.2\.10( |$)'
           nimble --version | grep -Eq '^nimble v0\.22\.2 '
       - run: nimble test -Y
       - run: bash -n tests/differential/docker-compose/run.sh
