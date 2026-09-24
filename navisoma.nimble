@@ -17,3 +17,4 @@ task test, "Run the Phase 1 pure-semantics and Phase 2 executor test suite":
   exec "nim c --path:src -r tests/test_planner.nim"
   exec "nim c --path:src -r tests/test_compose_parser.nim"
   exec "nim c --path:src -r tests/test_executor.nim"
+  exec "nim c --path:src -r tests/test_wslc_names.nim"

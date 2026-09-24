@@ -7,4 +7,6 @@ htmldocs/
 /tests/test_planner
 /tests/test_compose_parser
 /tests/test_executor
+/tests/test_wslc_names
 /native/containerd/.dev-run/
+/native/wslc/.build/

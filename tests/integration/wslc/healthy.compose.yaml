@@ -1,0 +1,15 @@
+services:
+  db:
+    image: docker.io/library/alpine:3.19
+    command: ["/bin/sh", "-c", "while :; do sleep 1; done"]
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 1s
+      timeout: 3s
+      retries: 2
+  api:
+    image: docker.io/library/alpine:3.19
+    command: ["/bin/sh", "-c", "while :; do sleep 1; done"]
+    depends_on:
+      db:
+        condition: service_healthy
