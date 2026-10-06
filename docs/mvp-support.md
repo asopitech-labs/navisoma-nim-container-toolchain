@@ -2,26 +2,33 @@
 
 ## Purpose and current evidence
 
-This document is the user-facing boundary for Issue #18's fixed MVP. The same
-health-gated dependency workflow is verified against containerd and WSLC. The
-Docker Compose oracle has two recorded runs on 2026-09-24:
+This document is the user-facing boundary for the constrained MVP. It supports
+health-gated dependencies and one-shot migrations gated by
+`service_completed_successfully`.
 
-- official Docker Compose v5.5.1 through Podman's Docker-compatible API;
-- Docker Compose v2.33.0 against Docker Engine v27.5.1 in disposable Linux
-  Docker-in-Docker.
+The migration workflow has the following current evidence:
 
-The Docker Engine run exited 0 with `OK: Docker Compose health-gate oracle`
-and left no Compose project behind. These runs are evidence for the oracle's
-Compose-client orchestration, not general Docker Engine conformance.
+- `nimble test` covers parser, planner, CLI trace, and fake backend success/
+  failure cleanup;
+- `tests/integration/containerd/run.sh` passed on 2026-10-06 against the
+  pinned containerd v2.3.5 daemon;
+- Docker Compose v2.33.0 against Docker Engine v27.5.1 passed in disposable
+  Linux Docker-in-Docker on 2026-10-06;
+- the WSLC binary cross-compiles against SDK 2.9.9 and the Windows fixture is
+  present, but this host cannot run its new migration scenario live.
+
+The Docker Engine run exited 0 with `OK: Docker Engine Compose migration-gate
+oracle` and removed both temporary projects. It is oracle evidence for Compose
+orchestration, not general Docker Engine conformance.
 
 ## Supported behavior
 
 | Area | MVP contract |
 | --- | --- |
-| Input | `services`, `image`, `command`, `environment`, the five healthcheck fields, and `depends_on.<service>.condition: service_healthy` |
+| Input | `services`, `image`, `command`, `environment`, the five healthcheck fields, and `depends_on.<service>.condition: service_healthy` or `service_completed_successfully` |
 | Planning | `plan --backend containerd` and `plan --backend wslc` produce the same action trace |
-| Startup | A dependent starts only after its dependency is healthy |
-| Failure | An unhealthy dependency prevents its dependent from starting and returns `service '<name>' is unhealthy after <retries> retries` |
+| Startup | A dependent starts only after its dependency is healthy, or after a one-shot migration exits 0 |
+| Failure | An unhealthy dependency prevents its dependent from starting; a failed migration returns `service '<name>' did not complete successfully (exit code <n>)` and NAVISOMA does not create/start its dependent |
 | Teardown | `down` stops/removes only invocation-owned services in reverse order |
 
 Everything else is rejected before runtime work: image builds, volumes,
@@ -54,22 +61,25 @@ normal `nimble test` run to install a host-native toolchain.
 
 ## Docker Compose oracle
 
-`tests/differential/docker-compose/run.sh` uses the same healthy and unhealthy
+`tests/differential/docker-compose/run.sh` uses the same health and migration
 fixtures as the containerd integration. It requires `docker compose version`
 to identify itself as official Docker Compose v2 or newer, then proves:
 
 1. `api` starts after `db`'s first successful healthcheck.
-2. An unhealthy `db` makes `up --wait` fail and never leaves `api` running.
-3. Both temporary Compose projects are removed by the script's exit trap.
+2. a successful migration exits 0 before `api` starts;
+3. a failed migration makes `up --wait` fail and never starts `api`;
+4. an unhealthy `db` makes `up --wait` fail and never leaves `api` running;
+5. all temporary Compose projects are removed by the script's exit trap.
 
 The script exits 77 when official Docker Compose v2+ is unavailable. This is a
 skip, not a passing oracle result; do not substitute Podman Compose for this
 check. The recorded Docker Engine run used Compose v2.33.0 and Engine v27.5.1
-in a disposable Docker-in-Docker daemon. Its healthy project started `api`
-after `db` became healthy; its unhealthy project failed `up --wait` without
-starting `api`. After the script, `docker compose ls -q` was empty, so neither
-project left containers or networks in the initially empty daemon. The outer
-daemon and its Podman network were removed by the test harness.
+in a disposable Docker-in-Docker daemon. Its successful migration exited 0
+before API start; its failed migration and unhealthy project failed `up --wait`
+without starting API. Compose can create a dependent container before its
+condition resolves, so the oracle deliberately verifies start order rather
+than NAVISOMA's stronger no-create rule. The outer daemon and its Podman
+network were removed by the test harness.
 
 ## Verification order
 
@@ -80,6 +90,8 @@ tests/integration/wslc/run.sh
 tests/differential/docker-compose/run.sh
 ```
 
-All four have current evidence. The final command requires an official Docker
-Compose v2+ client; a Docker Engine host is additionally required only for
-engine-level coverage.
+The unit/CLI test, containerd scenario, WSLC cross-build, and Docker Engine
+run above have current evidence. The WSLC migration fixture requires the
+recorded Windows host; it is not a passing substitute to cross-compile it on
+Linux. The final command requires an official Docker Compose v2+ client; a
+Docker Engine host is additionally required only for engine-level coverage.

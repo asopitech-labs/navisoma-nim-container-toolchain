@@ -102,6 +102,8 @@ proc wslcDeleteContainer*(container: WslcContainer, flags: cint,
   {.stdcall, importc: "WslcDeleteContainer", header: "wslcsdk.h".}
 proc wslcReleaseContainer*(container: WslcContainer): HResult
   {.stdcall, importc: "WslcReleaseContainer", header: "wslcsdk.h".}
+proc wslcGetContainerInitProcess*(container: WslcContainer, initProcess: ptr WslcProcess): HResult
+  {.stdcall, importc: "WslcGetContainerInitProcess", header: "wslcsdk.h".}
 
 proc wslcInitProcessSettings*(settings: ptr WslcProcessSettings): HResult
   {.stdcall, importc: "WslcInitProcessSettings", header: "wslcsdk.h".}

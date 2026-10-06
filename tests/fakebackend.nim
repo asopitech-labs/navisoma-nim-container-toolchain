@@ -16,7 +16,7 @@ import navisoma/errors
 type
   CallKind* = enum
     ckResolveImage, ckCreateContainer, ckStartContainer, ckStopContainer,
-    ckRemoveContainer, ckExecHealthProbe
+    ckRemoveContainer, ckWaitForContainerExit, ckExecHealthProbe
 
   Call* = object
     kind*: CallKind
@@ -27,6 +27,7 @@ type
   FakeBackend* = ref object
     calls: seq[Call]
     probeExitCodes: Table[string, seq[int]]
+    completionExitCodes: Table[string, seq[int]]
     failing: seq[tuple[kind: CallKind, service: string]]
 
 proc newFakeBackend*(): FakeBackend =
@@ -39,6 +40,11 @@ proc scriptProbes*(fb: FakeBackend, service: string, exitCodes: seq[int]) =
   ## `execHealthProbe` call — the "scripted probe outcome" the timing
   ## rule calls for instead of a real health command.
   fb.probeExitCodes[service] = exitCodes
+
+proc scriptCompletion*(fb: FakeBackend, service: string, exitCodes: seq[int]) =
+  ## Init-process exit codes for `service`, consumed in order by the
+  ## explicit completion wait used by a migration dependency gate.
+  fb.completionExitCodes[service] = exitCodes
 
 proc failOn*(fb: FakeBackend, kind: CallKind, service: string) =
   ## Make the given call raise `RuntimeError` for `service` instead of
@@ -71,6 +77,16 @@ proc port*(fb: FakeBackend): BackendPort =
 
   result.removeContainer = proc (service: string) =
     fb.calls.add Call(kind: ckRemoveContainer, arg: service)
+
+  result.waitForContainerExit = proc (service: string): ProbeResult =
+    fb.calls.add Call(kind: ckWaitForContainerExit, arg: service)
+    if fb.shouldFail(ckWaitForContainerExit, service):
+      raise newException(RuntimeError, "fake backend: waitForContainerExit failed for " & service)
+    doAssert service in fb.completionExitCodes and fb.completionExitCodes[service].len > 0,
+      "fake backend: no scripted completion outcome left for " & service
+    let code = fb.completionExitCodes[service][0]
+    fb.completionExitCodes[service].delete(0)
+    ProbeResult(exitCode: code)
 
   result.execHealthProbe = proc (service: string, test: seq[string], timeout: Duration): ProbeResult =
     fb.calls.add Call(kind: ckExecHealthProbe, arg: service)

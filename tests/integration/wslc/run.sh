@@ -19,10 +19,17 @@ trap cleanup EXIT
 "$root_dir/native/wslc/test-build.sh"
 mkdir -p "$stage_dir"
 cp "$root_dir/native/wslc/.build/navisoma.exe" "$root_dir/native/wslc/.build/wslcsdk.dll" "$stage_dir/"
-cp "$script_dir/healthy.compose.yaml" "$script_dir/unhealthy.compose.yaml" "$stage_dir/"
+cp "$script_dir/healthy.compose.yaml" "$script_dir/unhealthy.compose.yaml" \
+  "$script_dir/migration.compose.yaml" "$script_dir/migration-failure.compose.yaml" "$stage_dir/"
 windows_stage=$(wslpath -w "$stage_dir")
 "$stage_dir/navisoma.exe" up --backend wslc "$windows_stage\\healthy.compose.yaml"
 "$stage_dir/navisoma.exe" down --backend wslc "$windows_stage\\healthy.compose.yaml"
+"$stage_dir/navisoma.exe" up --backend wslc "$windows_stage\\migration.compose.yaml"
+"$stage_dir/navisoma.exe" down --backend wslc "$windows_stage\\migration.compose.yaml"
+if "$stage_dir/navisoma.exe" up --backend wslc "$windows_stage\\migration-failure.compose.yaml"; then
+  echo "failed migration unexpectedly succeeded" >&2
+  exit 1
+fi
 if "$stage_dir/navisoma.exe" up --backend wslc "$windows_stage\\unhealthy.compose.yaml"; then
   echo "unhealthy dependency unexpectedly succeeded" >&2
   exit 1

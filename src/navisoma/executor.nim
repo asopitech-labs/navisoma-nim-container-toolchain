@@ -55,7 +55,7 @@ proc runUp*(project: ComposeProject, port: BackendPort, clock: ProbeClock): seq[
   ## invocation journal (services successfully created) on success.
   ##
   ## On any failure — a dependency reaching `unhealthy` after retries,
-  ## or a backend error raised from resolve/create/start/exec — cleans
+  ## a nonzero completion exit, or a backend error — cleans
   ## up exactly the journaled resources in reverse order, then
   ## re-raises the original error unchanged.
   let trace = planUp(project)
@@ -87,6 +87,12 @@ proc runUp*(project: ComposeProject, port: BackendPort, clock: ProbeClock): seq[
         if state.phase == hpUnhealthy:
           raise newException(UnhealthyError,
             "service '" & action.service & "' is unhealthy after " & $spec.retries & " retries")
+      of akAwaitCompletion:
+        let completion = port.waitForContainerExit(action.service)
+        if completion.exitCode != 0:
+          raise newException(CompletionError,
+            "service '" & action.service & "' did not complete successfully (exit code " &
+            $completion.exitCode & ")")
       of akStopContainer, akRemoveContainer:
         discard # planUp never emits these; cleanup below is journal-driven, not trace-driven.
   except CatchableError:

@@ -180,6 +180,13 @@ bool isNotFound(const grpc::Status& status) {
   return status.error_code() == grpc::StatusCode::NOT_FOUND;
 }
 
+bool isNotRunning(const grpc::Status& status) {
+  // A migration whose init process has exited still has a task that must be deleted. containerd
+  // rejects a kill in that stopped state with FAILED_PRECONDITION, which is already the desired
+  // stop result for NAVISOMA's idempotent reverse cleanup.
+  return isNotFound(status) || status.error_code() == grpc::StatusCode::FAILED_PRECONDITION;
+}
+
 // Reads an entire content-store blob by digest via the streaming Content.Read RPC.
 std::string readAllContent(nvsm_containerd_client* client, const std::string& digest) {
   ReadContentRequest req;
@@ -693,6 +700,26 @@ nvsm_containerd_result* nvsm_containerd_start_container(nvsm_containerd_client* 
   }
 }
 
+nvsm_containerd_result* nvsm_containerd_wait_for_container_exit(
+    nvsm_containerd_client* client, const char* service_name, size_t service_name_len) {
+  try {
+    std::string id(service_name, service_name_len);
+    WaitRequest waitReq;
+    waitReq.set_container_id(id);
+    auto ctx = newCtx(client);
+    WaitResponse waitResp;
+    auto status = client->tasks->Wait(ctx.get(), waitReq, &waitResp);
+    if (!status.ok()) {
+      return failResult("tasks.wait(init): " + status.error_message());
+    }
+    auto* r = okResult();
+    r->exitCode = static_cast<int>(waitResp.exit_status());
+    return r;
+  } catch (const std::exception& e) {
+    return failResult(e.what());
+  }
+}
+
 nvsm_containerd_result* nvsm_containerd_exec_health_probe(
     nvsm_containerd_client* client,
     const char* service_name, size_t service_name_len,
@@ -797,7 +824,7 @@ nvsm_containerd_result* nvsm_containerd_stop_container(nvsm_containerd_client* c
     google::protobuf::Empty killResp;
     auto status = client->tasks->Kill(ctx1.get(), killReq, &killResp);
     if (!status.ok()) {
-      if (isNotFound(status)) return okResult(); // nothing running to stop
+      if (isNotRunning(status)) return okResult(); // nothing running to stop
       return failResult("tasks.kill: " + status.error_message());
     }
 

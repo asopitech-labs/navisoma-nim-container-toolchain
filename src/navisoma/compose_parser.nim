@@ -2,10 +2,12 @@
 ##
 ## Supported input: `services`, `image`, `command`, `environment`,
 ## `healthcheck.{test,interval,timeout,retries,start_period}`,
-## `depends_on.<service>.condition: service_healthy`, prebuilt images only.
+## `depends_on.<service>.condition: service_healthy` or
+## `service_completed_successfully`, prebuilt images only.
 ## Every other Compose key — `build:`, `networks`, `volumes`, `ports`,
 ## `secrets`/`configs`, `profiles`, `include`/`extends`/merge, and any
-## `depends_on` condition other than `service_healthy` — is explicitly
+## `depends_on` condition other than `service_healthy` or
+## `service_completed_successfully` — is explicitly
 ## deferred (per #18) and rejected here, before any planning happens, per
 ## #18's semantic failure contract ("An unsupported input ... fails before
 ## partial execution").
@@ -143,10 +145,15 @@ proc parseDependsOn(node: YamlNode, context: string): seq[DependsOnEdge] =
     if not value.hasKey("condition"):
       fail(context & "." & serviceName & ": missing required 'condition'")
     let condition = requireScalar(value["condition"], context & "." & serviceName & ".condition")
-    if condition != "service_healthy":
-      fail(context & "." & serviceName & ".condition: unsupported condition '" & condition &
-        "' (this MVP boundary supports only 'service_healthy')")
-    result.add DependsOnEdge(service: serviceName, condition: conditionServiceHealthy)
+    let parsedCondition = case condition
+      of "service_healthy": conditionServiceHealthy
+      of "service_completed_successfully": conditionServiceCompletedSuccessfully
+      else:
+        fail(context & "." & serviceName & ".condition: unsupported condition '" & condition &
+          "' (this MVP boundary supports only 'service_healthy' or " &
+          "'service_completed_successfully')")
+        conditionServiceHealthy # Unreachable; satisfies Nim's case expression typing.
+    result.add DependsOnEdge(service: serviceName, condition: parsedCondition)
 
 proc parseEnvironment(node: YamlNode, context: string): seq[tuple[key, value: string]] =
   case node.kind

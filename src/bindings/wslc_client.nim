@@ -166,6 +166,21 @@ proc removeContainer*(client: WslcClient, serviceName: string) =
   check(wslcReleaseContainer(container), "container release")
   client.containers.del(serviceName)
 
+proc waitForContainerExit*(client: WslcClient, serviceName: string): int =
+  var process: WslcProcess
+  check(wslcGetContainerInitProcess(client.containerFor(serviceName), addr process),
+        "init process lookup")
+  defer: discard wslcReleaseProcess(process)
+
+  var exitEvent: pointer
+  check(wslcGetProcessExitEvent(process, addr exitEvent), "init process wait setup")
+  if waitForSingleObject(exitEvent, Infinite) != WaitObject0:
+    raise newException(RuntimeError, "WSLC init process wait failed")
+
+  var exitCode: int32
+  check(wslcGetProcessExitCode(process, addr exitCode), "init process result")
+  exitCode.int
+
 proc execHealthProbe*(client: WslcClient, serviceName: string, test: seq[string], timeoutMs: int64): int =
   var settings: WslcProcessSettings
   check(wslcInitProcessSettings(addr settings), "health process setup")

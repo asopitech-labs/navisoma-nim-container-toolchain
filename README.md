@@ -1,18 +1,18 @@
 # NAVISOMA
 
-NAVISOMA is a small Nim CLI that runs one health-gated Compose workflow on
-containerd or WSL Containers (WSLC). It owns the restricted Compose parsing,
-health-state derivation, execution order, and reverse cleanup; the selected
+NAVISOMA is a small Nim CLI that runs a health-gated Compose workflow, plus a
+one-shot migration gate, on containerd or WSL Containers (WSLC). It owns the
+restricted Compose parsing, execution order, and reverse cleanup; the selected
 backend owns runtime calls and native handles.
 
 ## MVP status
 
-The fixed MVP is implemented and has real containerd and WSLC integration
-evidence. The Docker Compose differential ran with official Docker Compose
-v5.5.1 through Podman's Docker-compatible API and with Docker Compose v2.33.0
-against Docker Engine v27.5.1 in a disposable Linux environment. The latter
-completed with no temporary Compose project left behind. This validates the
-oracle's Compose-client orchestration, not general Docker Engine conformance.
+The constrained MVP accepts health gates and one migration-completion gate.
+The migration workflow passed a live containerd scenario and a Docker Engine
+v27.5.1 / Compose v2.33.0 differential run on 2026-10-06. The WSLC binary
+cross-compiles against SDK 2.9.9 and has the same fixture; its new migration
+scenario still needs a recorded Windows live run. See
+[MVP support and cleanup](docs/mvp-support.md) for the precise evidence.
 
 ## Operations
 
@@ -23,15 +23,16 @@ navisoma down --backend <containerd|wslc> compose.yaml
 ```
 
 `plan` prints the backend-neutral action trace. `up` resolves/pulls images,
-creates and starts services in dependency order, and runs a health command
-until a dependency is healthy. `down` stops and removes only resources created
-by that invocation, in reverse order.
+creates and starts services in dependency order, waits for health gates or a
+required migration exit code of zero, then starts dependents. `down` stops and
+removes only resources created by that invocation, in reverse order.
 
 ## Supported Compose subset
 
 - `services`, `image`, `command`, `environment`;
 - `healthcheck.test`, `interval`, `timeout`, `retries`, `start_period`;
 - `depends_on.<service>.condition: service_healthy`;
+- `depends_on.<service>.condition: service_completed_successfully`;
 - prebuilt images only.
 
 `build`, volumes, networks, ports, secrets/configs, profiles, includes,

@@ -86,6 +86,12 @@ proc startContainer*(c: ContainerdClient, serviceName: string) =
   checkResult(r, "start_container(" & serviceName & ")")
   nvsmContainerdResultRelease(r)
 
+proc waitForContainerExit*(c: ContainerdClient, serviceName: string): int =
+  let r = nvsmContainerdWaitForContainerExit(c.raw, serviceName.cstring, serviceName.len.csize_t)
+  checkResult(r, "wait_for_container_exit(" & serviceName & ")")
+  result = nvsmContainerdResultExitCode(r).int
+  nvsmContainerdResultRelease(r)
+
 proc execHealthProbe*(c: ContainerdClient, serviceName: string, test: seq[string], timeoutMs: int64): int =
   let (testC, testLens) = toCStringArray(test)
   let r = nvsmContainerdExecHealthProbe(

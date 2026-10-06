@@ -34,3 +34,8 @@ type
     ## before its dependent could be created/started — #18's semantic
     ## failure contract. Carries only the service name in its message,
     ## never backend detail.
+
+  CompletionError* = object of NavisomaError
+    ## A one-shot dependency exited nonzero before its dependent could be
+    ## created/started. Its message carries only a NAVISOMA service name
+    ## and exit code, never backend-native detail.

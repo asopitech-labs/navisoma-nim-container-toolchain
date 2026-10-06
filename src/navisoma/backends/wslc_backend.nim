@@ -26,6 +26,8 @@ proc newWslcPort*(projectId: string): tuple[port: BackendPort, client: WslcClien
     client.stopContainer(wslcContainerId(projectId, service))
   port.removeContainer = proc(service: string) =
     client.removeContainer(wslcContainerId(projectId, service))
+  port.waitForContainerExit = proc(service: string): ProbeResult =
+    ProbeResult(exitCode: client.waitForContainerExit(wslcContainerId(projectId, service)))
   port.execHealthProbe = proc(service: string, test: seq[string], timeout: Duration): ProbeResult =
     ProbeResult(exitCode: client.execHealthProbe(wslcContainerId(projectId, service), test, timeout.inMilliseconds.int64))
 

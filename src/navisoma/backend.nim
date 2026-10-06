@@ -1,6 +1,6 @@
 ## The backend port (#18 phase 2): the smallest runtime surface the
 ## executor needs — image resolve, create/start/stop/remove, and
-## health-command exec — per docs/architecture.md section 4
+## health-command exec, and init-process completion — per docs/architecture.md section 4
 ## ("Runtime-neutral semantics").
 ##
 ## Every operation is addressed by a NAVISOMA-level identifier (an image
@@ -30,6 +30,9 @@ type
     startContainer*: proc (service: string) {.closure.}
     stopContainer*: proc (service: string) {.closure.}
     removeContainer*: proc (service: string) {.closure.}
+    waitForContainerExit*: proc (service: string): ProbeResult {.closure.}
+      ## Waits for the service's init process and returns its exit status.
+      ## The executor decides whether a status satisfies a completion gate.
     execHealthProbe*: proc (service: string, test: seq[string], timeout: Duration): ProbeResult {.closure.}
       ## `timeout` is the healthcheck's per-probe deadline (Compose
       ## `healthcheck.timeout`) — an adapter that can hang (a real backend

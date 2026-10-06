@@ -101,6 +101,10 @@ proc nvsmContainerdStartContainer*(client: NvsmContainerdClientPtr,
     serviceName: cstring, serviceNameLen: csize_t): NvsmContainerdResultPtr
   {.importc: "nvsm_containerd_start_container", header: "containerd_bridge.h".}
 
+proc nvsmContainerdWaitForContainerExit*(client: NvsmContainerdClientPtr,
+    serviceName: cstring, serviceNameLen: csize_t): NvsmContainerdResultPtr
+  {.importc: "nvsm_containerd_wait_for_container_exit", header: "containerd_bridge.h".}
+
 proc nvsmContainerdExecHealthProbe*(
     client: NvsmContainerdClientPtr,
     serviceName: cstring, serviceNameLen: csize_t,

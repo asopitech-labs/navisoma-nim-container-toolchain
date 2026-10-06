@@ -53,6 +53,9 @@ proc newContainerdPort*(projectId: string,
   port.removeContainer = proc (service: string) =
     client.removeContainer(containerId(service))
 
+  port.waitForContainerExit = proc (service: string): ProbeResult =
+    ProbeResult(exitCode: client.waitForContainerExit(containerId(service)))
+
   port.execHealthProbe = proc (service: string, test: seq[string], timeout: Duration): ProbeResult =
     ProbeResult(exitCode: client.execHealthProbe(containerId(service), test, timeout.inMilliseconds.int64))
 

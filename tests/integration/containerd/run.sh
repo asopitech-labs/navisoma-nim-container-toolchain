@@ -87,6 +87,33 @@ check "healthy down exit code" "$downExit" "0"
 check "healthy down: no containers left" "$(ctr_ns containers list | wc -l)" "1"
 check "healthy down: no tasks left" "$(ctr_ns tasks list | wc -l)" "1"
 
+echo "=== migration fixture: up ==="
+set +e
+run_navisoma up --backend containerd "tests/integration/containerd/migration.compose.yaml"
+upExit=$?
+set -e
+check "migration up exit code" "$upExit" "0"
+check "migration up: db running" "$(ctr_ns tasks list | awk 'NR>1 && $1 ~ /-db$/ && $3 == "RUNNING" {count++} END {print count + 0}')" "1"
+check "migration up: api starts after completion" "$(ctr_ns tasks list | awk 'NR>1 && $1 ~ /-api$/ && $3 == "RUNNING" {count++} END {print count + 0}')" "1"
+check "migration up: migration exited successfully" "$(ctr_ns tasks list | awk 'NR>1 && $1 ~ /-migrate$/ && $3 == "STOPPED" {count++} END {print count + 0}')" "1"
+
+echo "=== migration fixture: down ==="
+set +e
+run_navisoma down --backend containerd "tests/integration/containerd/migration.compose.yaml"
+downExit=$?
+set -e
+check "migration down exit code" "$downExit" "0"
+check "migration down: no containers left" "$(ctr_ns containers list | wc -l)" "1"
+
+echo "=== failed migration fixture: up ==="
+set +e
+upOutput=$(run_navisoma up --backend containerd "tests/integration/containerd/migration-failure.compose.yaml")
+upExit=$?
+set -e
+check "failed migration up exit code" "$upExit" "1"
+check "failed migration up: stable semantic error" "$(echo "$upOutput" | grep -c "service 'migrate' did not complete successfully (exit code 7)")" "1"
+check "failed migration up: reverse cleanup leaves no containers" "$(ctr_ns containers list | wc -l)" "1"
+
 echo "=== unhealthy fixture: up ==="
 set +e
 upOutput=$(run_navisoma up --backend containerd "tests/integration/containerd/unhealthy.compose.yaml")

@@ -4,7 +4,7 @@
 // handles for both values and errors.
 //
 // This is the *only* thing src/native/containerd_raw.nim (the raw Nim importc layer) talks to.
-// Every operation here is exactly one of the 6 BackendPort operations (src/navisoma/backend.nim)
+// Every operation here is exactly one of the 7 BackendPort operations (src/navisoma/backend.nim)
 // — no backend-native handle or containerd concept (task, snapshot, namespace) is exposed beyond
 // this file; the Nim side only ever sees NAVISOMA-level identifiers (image ref, service name).
 #ifndef NAVISOMA_CONTAINERD_BRIDGE_H
@@ -54,7 +54,7 @@ void nvsm_containerd_free_string(char* s);
 
 void nvsm_containerd_close(nvsm_containerd_client* client);
 
-// --- The 6 BackendPort operations -----------------------------------------------------------
+// --- The 7 BackendPort operations -----------------------------------------------------------
 
 // Pulls `image_ref` into containerd's image store via the Transfer service (server-side pull —
 // NAVISOMA never implements registry auth/content ingestion itself) and returns the resolved
@@ -78,6 +78,12 @@ nvsm_containerd_result* nvsm_containerd_create_container(
     const char* const* env_values, const size_t* env_value_lens, size_t env_len);
 
 nvsm_containerd_result* nvsm_containerd_start_container(
+    nvsm_containerd_client* client,
+    const char* service_name, size_t service_name_len);
+
+// Waits for the started task's init process to exit and returns its exit status. The caller
+// decides whether a nonzero status is semantically acceptable.
+nvsm_containerd_result* nvsm_containerd_wait_for_container_exit(
     nvsm_containerd_client* client,
     const char* service_name, size_t service_name_len);
 

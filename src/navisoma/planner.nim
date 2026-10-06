@@ -8,7 +8,7 @@ import ./errors
 
 type
   ActionKind* = enum
-    akResolveImage, akCreateContainer, akStartContainer, akAwaitHealth,
+    akResolveImage, akCreateContainer, akStartContainer, akAwaitHealth, akAwaitCompletion,
     akStopContainer, akRemoveContainer
 
   Action* = object
@@ -18,6 +18,7 @@ type
 const ActionDisplayName: array[ActionKind, string] = [
   akResolveImage: "ResolveImage", akCreateContainer: "CreateContainer",
   akStartContainer: "StartContainer", akAwaitHealth: "AwaitHealth",
+  akAwaitCompletion: "AwaitCompletion",
   akStopContainer: "StopContainer", akRemoveContainer: "RemoveContainer"]
 
 proc `$`*(a: Action): string =
@@ -35,10 +36,10 @@ proc validate(project: ComposeProject) =
     for edge in svc.dependsOn:
       if not project.hasService(edge.service):
         unknownRefs.add(svc.name & " -> " & edge.service)
-      elif project.findService(edge.service).get().healthcheck.isNone:
-        # `condition: service_healthy` is the only depends_on condition
-        # this MVP boundary supports (types.nim), so every edge implies a
-        # health gate; a target with no healthcheck can never satisfy it.
+      elif edge.condition == conditionServiceHealthy and
+          project.findService(edge.service).get().healthcheck.isNone:
+        # Only a `service_healthy` edge needs a target healthcheck. A
+        # completion gate instead observes its target's init exit code.
         missingHealthcheckRefs.add(svc.name & " -> " & edge.service)
   if unknownRefs.len > 0:
     raise newException(ComposeSemanticError,
@@ -84,11 +85,17 @@ proc topoOrder(project: ComposeProject): seq[string] =
     raise newException(PlanningError,
       "depends_on has a cycle involving: " & unresolved.join(", "))
 
+proc requiresCompletion(project: ComposeProject, service: string): bool =
+  for dependent in project.services:
+    for edge in dependent.dependsOn:
+      if edge.service == service and edge.condition == conditionServiceCompletedSuccessfully:
+        return true
+  false
+
 proc planUp*(project: ComposeProject): seq[Action] =
-  ## `resolve -> create -> start -> [await health]`, in dependency order,
-  ## for every service. A dependency's `AwaitHealth` action is always
-  ## ordered before any service that depends on it, which is what makes
-  ## the gate in #18's semantic failure contract observable in the trace.
+  ## `resolve -> create -> start -> [await health] -> [await completion]`,
+  ## in dependency order for every service. A completion wait is emitted
+  ## only when another service explicitly depends on that completion.
   validate(project)
   let order = topoOrder(project)
   for name in order:
@@ -98,6 +105,8 @@ proc planUp*(project: ComposeProject): seq[Action] =
     result.add Action(kind: akStartContainer, service: name)
     if svc.healthcheck.isSome:
       result.add Action(kind: akAwaitHealth, service: name)
+    if project.requiresCompletion(name):
+      result.add Action(kind: akAwaitCompletion, service: name)
 
 proc planDown*(upTrace: seq[Action]): seq[Action] =
   ## Deterministic reverse-order stop/remove of exactly the services an

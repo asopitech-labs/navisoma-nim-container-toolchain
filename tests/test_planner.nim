@@ -8,13 +8,16 @@ import navisoma/types
 import navisoma/errors
 import navisoma/planner
 
-proc svc(name: string, healthcheck = false, dependsOn: seq[string] = @[]): ServiceSpec =
+proc svc(name: string, healthcheck = false, dependsOn: seq[string] = @[],
+         completionDependsOn: seq[string] = @[]): ServiceSpec =
   result = ServiceSpec(name: name, image: "registry.example.com/" & name & ":1")
   if healthcheck:
     result.healthcheck = some(HealthCheckSpec(retries: 3, interval: initDuration(seconds = 5),
                                                 timeout: initDuration(seconds = 3), startPeriod: initDuration()))
   for dep in dependsOn:
     result.dependsOn.add DependsOnEdge(service: dep, condition: conditionServiceHealthy)
+  for dep in completionDependsOn:
+    result.dependsOn.add DependsOnEdge(service: dep, condition: conditionServiceCompletedSuccessfully)
 
 suite "planner":
   test "depends_on naming an undeclared service is rejected":
@@ -73,6 +76,26 @@ suite "planner":
     ]
     # Re-planning the same fixture produces the exact same trace.
     check planUp(project) == trace
+
+  test "a successful migration is awaited before its dependent is created":
+    let project = ComposeProject(services: @[
+      svc("api", completionDependsOn = @["migrate"]),
+      svc("migrate", dependsOn = @["db"]),
+      svc("db", healthcheck = true)
+    ])
+    check planUp(project) == @[
+      Action(kind: akResolveImage, service: "db"),
+      Action(kind: akCreateContainer, service: "db"),
+      Action(kind: akStartContainer, service: "db"),
+      Action(kind: akAwaitHealth, service: "db"),
+      Action(kind: akResolveImage, service: "migrate"),
+      Action(kind: akCreateContainer, service: "migrate"),
+      Action(kind: akStartContainer, service: "migrate"),
+      Action(kind: akAwaitCompletion, service: "migrate"),
+      Action(kind: akResolveImage, service: "api"),
+      Action(kind: akCreateContainer, service: "api"),
+      Action(kind: akStartContainer, service: "api"),
+    ]
 
   test "planDown reverses exactly the services planUp created":
     let project = ComposeProject(services: @[

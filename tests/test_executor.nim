@@ -11,13 +11,16 @@ import navisoma/errors
 import navisoma/executor
 import ./fakebackend
 
-proc svc(name: string, healthcheck = false, dependsOn: seq[string] = @[]): ServiceSpec =
+proc svc(name: string, healthcheck = false, dependsOn: seq[string] = @[],
+         completionDependsOn: seq[string] = @[]): ServiceSpec =
   result = ServiceSpec(name: name, image: "registry.example.com/" & name & ":1")
   if healthcheck:
     result.healthcheck = some(HealthCheckSpec(retries: 3, interval: initDuration(seconds = 5),
                                                 timeout: initDuration(seconds = 3), startPeriod: initDuration()))
   for dep in dependsOn:
     result.dependsOn.add DependsOnEdge(service: dep, condition: conditionServiceHealthy)
+  for dep in completionDependsOn:
+    result.dependsOn.add DependsOnEdge(service: dep, condition: conditionServiceCompletedSuccessfully)
 
 proc pastStartPeriodClock(attempt: int, interval: Duration): Duration = initDuration(seconds = 100)
 
@@ -94,6 +97,58 @@ suite "executor":
     check fb.calls.filterIt(it.kind == ckStopContainer) == @[Call(kind: ckStopContainer, arg: "db")]
     check fb.calls.filterIt(it.kind == ckRemoveContainer) == @[Call(kind: ckRemoveContainer, arg: "db")]
     check not fb.calls.anyIt(it.arg == "api" and it.kind in {ckStopContainer, ckRemoveContainer})
+
+  test "successful migration completion is awaited before api is created":
+    let project = ComposeProject(services: @[
+      svc("api", completionDependsOn = @["migrate"]),
+      svc("migrate", dependsOn = @["db"]),
+      svc("db", healthcheck = true)
+    ])
+    let fb = newFakeBackend()
+    fb.scriptProbes("db", @[0])
+    fb.scriptCompletion("migrate", @[0])
+
+    let journal = runUp(project, fb.port(), pastStartPeriodClock)
+
+    check journal == @["db", "migrate", "api"]
+    check fb.calls == @[
+      Call(kind: ckResolveImage, arg: "registry.example.com/db:1"),
+      Call(kind: ckCreateContainer, arg: "db"),
+      Call(kind: ckStartContainer, arg: "db"),
+      Call(kind: ckExecHealthProbe, arg: "db"),
+      Call(kind: ckResolveImage, arg: "registry.example.com/migrate:1"),
+      Call(kind: ckCreateContainer, arg: "migrate"),
+      Call(kind: ckStartContainer, arg: "migrate"),
+      Call(kind: ckWaitForContainerExit, arg: "migrate"),
+      Call(kind: ckResolveImage, arg: "registry.example.com/api:1"),
+      Call(kind: ckCreateContainer, arg: "api"),
+      Call(kind: ckStartContainer, arg: "api"),
+    ]
+
+  test "failed migration completion never creates api and cleans up owned services in reverse order":
+    let project = ComposeProject(services: @[
+      svc("api", completionDependsOn = @["migrate"]),
+      svc("migrate", dependsOn = @["db"]),
+      svc("db", healthcheck = true)
+    ])
+    let fb = newFakeBackend()
+    fb.scriptProbes("db", @[0])
+    fb.scriptCompletion("migrate", @[7])
+
+    var message = ""
+    try:
+      discard runUp(project, fb.port(), pastStartPeriodClock)
+    except CompletionError as error:
+      message = error.msg
+
+    check message == "service 'migrate' did not complete successfully (exit code 7)"
+    check not fb.calls.anyIt(it.arg == "api" and it.kind in {ckCreateContainer, ckStartContainer})
+    check fb.calls[^4 .. ^1] == @[
+      Call(kind: ckStopContainer, arg: "migrate"),
+      Call(kind: ckRemoveContainer, arg: "migrate"),
+      Call(kind: ckStopContainer, arg: "db"),
+      Call(kind: ckRemoveContainer, arg: "db"),
+    ]
 
 suite "newRealProbeClock":
   test "attempt 0 fires immediately (no sleep), later attempts actually wait `interval`":

@@ -37,6 +37,22 @@ suite "restricted Compose parser":
     check api.dependsOn.len == 1
     check api.dependsOn[0].service == "db"
 
+  test "parses service_completed_successfully for a one-shot migration gate":
+    let source = """
+services:
+  migrate:
+    image: registry.example.com/migrate:1
+  api:
+    image: registry.example.com/api:1
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+"""
+    let api = parseComposeProject(source).findService("api").get()
+    check api.dependsOn == @[
+      DependsOnEdge(service: "migrate", condition: conditionServiceCompletedSuccessfully)
+    ]
+
   test "strips the 'CMD' prefix rather than passing it through as an argument":
     let source = """
 services:

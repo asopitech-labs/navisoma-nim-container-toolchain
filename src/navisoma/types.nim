@@ -1,6 +1,7 @@
 ## Canonical application model for the #18 MVP boundary only: `services`,
 ## `image`, `command`, `environment`, `healthcheck.*`, and
-## `depends_on.<service>.condition: service_healthy`. No Docker, containerd,
+## `depends_on.<service>.condition: service_healthy` or
+## `service_completed_successfully`. No Docker, containerd,
 ## WSLC, gRPC, or protobuf type appears here — see docs/architecture.md
 ## section 2.
 
@@ -15,10 +16,9 @@ type
     startPeriod*: Duration
 
   DependsOnCondition* = enum
-    ## The MVP boundary supports exactly one condition; other Compose
-    ## conditions (`service_started`, `service_completed_successfully`) are
-    ## explicitly deferred per #18's fixed MVP boundary.
-    conditionServiceHealthy
+    ## The constrained MVP supports readiness gates and one-shot job
+    ## completion gates. `service_started` remains explicitly deferred.
+    conditionServiceHealthy, conditionServiceCompletedSuccessfully
 
   DependsOnEdge* = object
     service*: string
