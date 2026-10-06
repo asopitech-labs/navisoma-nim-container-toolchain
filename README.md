@@ -67,6 +67,7 @@ The native integration scripts above remain separate local verification.
 
 - [containerd implementation record](docs/containerd-dev-environment.md)
 - [WSLC build and live-host record](docs/wslc-dev-environment.md)
+- [next user-value decision](docs/validation/next-user-value-decision.md)
 - [architecture](docs/architecture.md)
 - [research and longer-term plans](docs/implementation-plan.md)
 
