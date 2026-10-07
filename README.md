@@ -13,6 +13,9 @@ v27.5.1 / Compose v2.33.0 differential run on 2026-10-06. The WSLC binary
 cross-compiles against SDK 2.9.9 and has the same fixture; its new migration
 scenario still needs a recorded Windows live run. See
 [MVP support and cleanup](docs/mvp-support.md) for the precise evidence.
+The dedicated WSLC workflow intentionally reports an unexecuted failure until
+its labeled Windows runner is online; its setup is documented in
+[the WSLC runbook](docs/wslc-dev-environment.md).
 
 ## Operations
 

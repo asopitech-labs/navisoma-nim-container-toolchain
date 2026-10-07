@@ -19,3 +19,4 @@ task test, "Run MVP unit and CLI tests":
   exec "nim c --path:src -r tests/test_executor.nim"
   exec "nim c --path:src -r tests/test_wslc_names.nim"
   exec "tests/test_cli_plan.sh"
+  exec "sh tests/test_wslc_ci_contract.sh"

@@ -14,8 +14,9 @@ The migration workflow has the following current evidence:
   pinned containerd v2.3.5 daemon;
 - Docker Compose v2.33.0 against Docker Engine v27.5.1 passed in disposable
   Linux Docker-in-Docker on 2026-10-06;
-- the WSLC binary cross-compiles against SDK 2.9.9 and the Windows fixture is
-  present, but this host cannot run its new migration scenario live.
+- the WSLC binary cross-compiles against SDK 2.9.9; its dedicated workflow
+  reports an explicit unexecuted failure until an online Windows runner is
+  configured.
 
 The Docker Engine run exited 0 with `OK: Docker Engine Compose migration-gate
 oracle` and removed both temporary projects. It is oracle evidence for Compose
@@ -40,7 +41,7 @@ multi-project reconciliation, GPU, macOS, and general Compose compatibility.
 | Backend | Native input and host | Build and scenario |
 | --- | --- | --- |
 | containerd | Pinned containerd v2.3.5, generated gRPC/protobuf facade, and a disposable daemon in Podman or Docker | `tests/integration/containerd/run.sh` |
-| WSLC | `Microsoft.WSL.Containers` 2.9.9 fetched and hash-checked during the build; Windows WSL service on the recorded Windows + WSL host | `tests/integration/wslc/run.sh` |
+| WSLC | `Microsoft.WSL.Containers` 2.9.9 fetched and hash-checked during the build; a labeled Windows WSL runner | `tests/integration/wslc/run.sh` via `.github/workflows/wslc-integration.yml` |
 
 The containerd and WSLC native details, pinned inputs, and regeneration/build
 procedures live in [containerd-dev-environment.md](containerd-dev-environment.md)
@@ -91,7 +92,8 @@ tests/differential/docker-compose/run.sh
 ```
 
 The unit/CLI test, containerd scenario, WSLC cross-build, and Docker Engine
-run above have current evidence. The WSLC migration fixture requires the
-recorded Windows host; it is not a passing substitute to cross-compile it on
-Linux. The final command requires an official Docker Compose v2+ client; a
-Docker Engine host is additionally required only for engine-level coverage.
+run above have current evidence. The WSLC workflow is intentionally an
+unexecuted failure until a labeled Windows runner is online; its setup is in
+[the WSLC runbook](wslc-dev-environment.md). The final command requires an
+official Docker Compose v2+ client; a Docker Engine host is additionally
+required only for engine-level coverage.

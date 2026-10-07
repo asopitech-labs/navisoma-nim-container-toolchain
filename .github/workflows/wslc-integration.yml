@@ -1,0 +1,88 @@
+name: WSLC integration
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 18 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wslc-integration
+  cancel-in-progress: false
+
+jobs:
+  runner-preflight:
+    name: Report an unready WSLC runner
+    runs-on: ubuntu-24.04
+    steps:
+      - id: check
+        env:
+          RUNNER_READY: ${{ vars.NAVISOMA_WSLC_RUNNER_READY }}
+          WSL_DISTRIBUTION: ${{ vars.NAVISOMA_WSLC_WSL_DISTRIBUTION }}
+        run: |
+          set -euo pipefail
+          unexecuted() {
+            {
+              echo '## WSLC integration is unexecuted'
+              echo
+              echo "$1"
+              echo 'See docs/wslc-dev-environment.md for runner setup.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+
+          if [ -z "$WSL_DISTRIBUTION" ]; then
+            unexecuted 'Repository variable NAVISOMA_WSLC_WSL_DISTRIBUTION is not set.'
+          fi
+
+          if [ "$RUNNER_READY" != "true" ]; then
+            unexecuted 'Repository variable NAVISOMA_WSLC_RUNNER_READY is not true.'
+          fi
+
+          echo '## WSLC integration preflight passed' >> "$GITHUB_STEP_SUMMARY"
+          echo 'The runner readiness declaration is true.' >> "$GITHUB_STEP_SUMMARY"
+          echo "Using WSL distribution: $WSL_DISTRIBUTION" >> "$GITHUB_STEP_SUMMARY"
+
+  integration:
+    name: Run the WSLC lifecycle scenario
+    needs: runner-preflight
+    runs-on: [self-hosted, windows, x64, navisoma-wslc]
+    env:
+      WSL_DISTRIBUTION: ${{ vars.NAVISOMA_WSLC_WSL_DISTRIBUTION }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record host versions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pwsh --version
+          wsl.exe --version
+          wsl.exe --status
+      - name: Run healthy, migration, and expected-failure scenarios
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:WSL_DISTRIBUTION)) {
+            throw 'NAVISOMA_WSLC_WSL_DISTRIBUTION is required.'
+          }
+          $workspace = (wsl.exe --distribution $env:WSL_DISTRIBUTION -- wslpath -u $env:GITHUB_WORKSPACE).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          wsl.exe --distribution $env:WSL_DISTRIBUTION -- bash -lc "cd '$workspace' && NAVISOMA_WSLC_WIN_USER='$env:USERNAME' tests/integration/wslc/run.sh"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify runner cleanup
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $env:LOCALAPPDATA 'Temp\navisoma-wslc-integration'
+          if (Test-Path -LiteralPath $stage) {
+            throw "WSLC staging directory was not removed: $stage"
+          }
+          $daemons = Get-Process navisoma -ErrorAction SilentlyContinue
+          if ($daemons) {
+            $daemons | Format-Table -AutoSize | Out-String | Write-Error
+            throw 'A NAVISOMA WSLC daemon is still running.'
+          }
+          Write-Output 'OK: WSLC staging and daemon cleanup verified'
