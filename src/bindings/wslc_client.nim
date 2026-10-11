@@ -12,7 +12,7 @@ import ../navisoma/errors
 const
   SOk = 0'i32
   WSLC_CONTAINER_NETWORKING_MODE_BRIDGED = 1.cint
-  WSLC_CONTAINER_START_FLAG_ATTACH = 1.cint
+  WSLC_CONTAINER_START_FLAG_NONE = 0.cint
   WSLC_SIGNAL_SIGTERM = 15.cint
   WSLC_SIGNAL_SIGKILL = 9.cint
   WSLC_DELETE_CONTAINER_FLAG_FORCE = 1.cint
@@ -144,7 +144,7 @@ proc containerFor(client: WslcClient, serviceName: string): WslcContainer =
 
 proc startContainer*(client: WslcClient, serviceName: string) =
   var errorMessage: pointer
-  check(wslcStartContainer(client.containerFor(serviceName), WSLC_CONTAINER_START_FLAG_ATTACH, addr errorMessage),
+  check(wslcStartContainer(client.containerFor(serviceName), WSLC_CONTAINER_START_FLAG_NONE, addr errorMessage),
         "container start", errorMessage)
 
 proc stopContainer*(client: WslcClient, serviceName: string) =
